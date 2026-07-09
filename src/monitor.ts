@@ -36,7 +36,8 @@ function log(message: string): void {
 async function notifyAvailable(context: BrowserContext, result: PriceSummaryResult): Promise<void> {
   const priceText = result.cheapestPrice == null ? '' : ` Ən ucuz: ${formatPrice(result.cheapestPrice)} AZN.`;
   const targetText = result.target ? `${result.target.displayValue}, ` : '';
-  const message = `${request.from.exact} -> ${request.to.exact}, ${targetText}${request.adults} b.${priceText}`;
+  const linkText = result.ticketSearchUrl ? ` Link: ${result.ticketSearchUrl}` : '';
+  const message = `${request.from.exact} -> ${request.to.exact}, ${targetText}${request.adults} b.${priceText}${linkText}`;
   showWindowsNotification('ADY bilet tapıla bilər', message);
   log(`Windows notification göndərildi.${result.screenshotPath ? ` Screenshot: ${result.screenshotPath}` : ''}`);
 

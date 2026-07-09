@@ -311,7 +311,13 @@ export class AdyJobManager extends EventEmitter {
 }
 
 export function buildAvailableMessage(request: AdyRequest, matches: TicketsFoundResult[], maxPrice: number): string {
-  const lines = matches.map((match) => `- ${match.target.displayValue}: ${formatPrice(match.cheapestPrice)} AZN`);
+  const lines = matches.flatMap((match) => {
+    const priceLine = `- ${match.target.displayValue}: ${formatPrice(match.cheapestPrice)} AZN`;
+    if (!match.ticketSearchUrl) return [priceLine];
+    return [priceLine, `  Link: ${match.ticketSearchUrl}`];
+  });
+  const hasDeepLink = matches.some((match) => Boolean(match.ticketSearchUrl));
+
   return [
     'ADY bileti hazır görünür.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
@@ -319,7 +325,7 @@ export function buildAvailableMessage(request: AdyRequest, matches: TicketsFound
     '',
     ...lines,
     '',
-    'Gir al: https://ticket.ady.az/',
+    hasDeepLink ? 'Linkə klikləyəndə birbaşa bilet seçimi səhifəsi açılmalıdır.' : 'Gir al: https://ticket.ady.az/',
   ].join('\n');
 }
 
