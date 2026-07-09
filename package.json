@@ -1,0 +1,32 @@
+{
+  "name": "ady-ticket-monitor",
+  "version": "1.0.0",
+  "description": "ADY ticket availability monitor for ticket.ady.az",
+  "main": "dist/monitor.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && node dist/monitor.js",
+    "bot": "npm run build && node dist/telegram-bot.js",
+    "check": "npm run build && node dist/monitor.js --once",
+    "notify:test": "npm run build && node dist/notify-test.js",
+    "whatsapp:test": "npm run build && node dist/whatsapp-test.js",
+    "simulate:found": "npm run build && node dist/simulate-found.js"
+  },
+  "keywords": [
+    "ady",
+    "ticket",
+    "monitor",
+    "playwright"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.2.0",
+    "node-telegram-bot-api": "^1.1.2",
+    "playwright": "^1.53.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+}

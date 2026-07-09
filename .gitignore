@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+.browser-profile/
+.whatsapp-profile/
+artifacts/
+npm-debug.log*

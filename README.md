@@ -1,0 +1,136 @@
+# ADY Ticket Monitor
+
+Bu layihə `https://ticket.ady.az/` üçün ADY bilet monitorinqidir. Əvvəlki CLI script saxlanılıb, əlavə olaraq Telegram bot rejimi var.
+
+## Qurulum
+
+```powershell
+npm.cmd install
+```
+
+`.env.example` faylını `.env` kimi kopyala və dəyərləri doldur.
+
+TypeScript yoxlama və build:
+
+```powershell
+npm.cmd run typecheck
+npm.cmd run build
+```
+
+Telegram bot üçün minimum:
+
+```powershell
+TELEGRAM_BOT_TOKEN=123456:telegram-token
+```
+
+İstəsən botu yalnız konkret chat-lar üçün aç:
+
+```powershell
+TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
+```
+
+## Telegram bot
+
+```powershell
+npm.cmd run bot
+```
+
+Bot axını:
+
+1. `/start`
+2. `ADY.az` seçimi
+3. Haradan stansiyası
+4. Haraya stansiyası
+5. Calendar üzərindən 1-4 arası gediş tarixi
+6. Sərnişin sayı
+7. Maksimum qiymət
+8. Təsdiq
+
+Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. Sadəcə gediş tarixləri seçilir və bu seçim multi ola bilər, amma maksimum 4 gün seçilə bilər.
+
+İcazəli başlanğıc stansiyaları:
+
+- Bakı
+- Biləcəri
+- Yevlax
+- Gəncə
+- Ağstafa
+- Böyük-Kəsik
+
+İcazəli son məntəqələr:
+
+- Tbilisi-Sərn
+- Qardabani
+
+Tbilisi/Qardabani -> Bakı istiqaməti botda seçilə bilmir.
+
+Monitorinq hər `ADY_INTERVAL_MS` intervalında yoxlayır. Default `300000` ms-dir, yəni 5 dəqiqə.
+
+Uyğun bilet tapılanda bot istifadəçiyə mesaj göndərir:
+
+- marşrut
+- sərnişin sayı
+- seçilən tarix
+- tapılan ən ucuz qiymət
+- `ticket.ady.az` linki
+
+Eyni sorğunu bir neçə user seçəndə ayrıca scrape açılmır. Sorğu fingerprint-i bunlardan ibarətdir:
+
+- haradan
+- haraya
+- seçilən tarixlər
+- sərnişin sayı
+
+Maksimum qiymət fingerprint-ə daxil edilmir. Beləliklə eyni scrape nəticəsi fərqli max qiymətli user-lər üçün təkrar istifadə olunur.
+
+ADY-yə yük düşməməsi üçün eyni anda işləyən unikal scrape sayı limitlənir:
+
+```powershell
+ADY_BOT_MAX_CONCURRENT_CHECKS=2
+```
+
+## CLI monitor
+
+Bir dəfə yoxlama:
+
+```powershell
+npm.cmd run check
+```
+
+5 dəqiqəlik monitor:
+
+```powershell
+npm.cmd start
+```
+
+CLI rejimində default sorğu `.env`-dən oxunur:
+
+```powershell
+ADY_FROM_EXACT=BAKI DYV
+ADY_TO_EXACT=TBİLİSİ-SƏRN
+ADY_TARGET_DATES=2026-08-01,2026-08-02,2026-08-03,2026-08-04
+ADY_ADULTS=3
+ADY_MAX_PRICE=87.72
+```
+
+## Static ADY filterləri
+
+Telegram botdakı stansiya siyahısı `src/modules/ady/stations.ts` içində statik saxlanılır. Siyahı ADY dropdown-dan scrape olunub və exact label-lar saxlanılıb ki, Playwright seçimi saytdakı real option text-lə işləsin.
+
+## WhatsApp testləri
+
+Köhnə WhatsApp testləri qalır:
+
+```powershell
+npm.cmd run whatsapp:test
+npm.cmd run simulate:found
+```
+
+WhatsApp üçün:
+
+```powershell
+ADY_WHATSAPP_ENABLED=true
+ADY_WHATSAPP_PHONE=994501234567
+```
+
+Qeyd: sayt Cloudflare istifadə edir. Ona görə browser default olaraq görünən rejimdə açılır (`ADY_HEADLESS=false`) və `.browser-profile` qovluğunda sessiyanı saxlayır.
