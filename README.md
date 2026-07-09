@@ -29,6 +29,24 @@ TELEGRAM_BOT_TOKEN=123456:telegram-token
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
 ```
 
+Bot üçün `.env`-də saxlanan parametrlər:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ALLOWED_CHAT_IDS`
+- `ADY_URL`
+- `ADY_INTERVAL_MS`
+- `ADY_RESULT_WAIT_MS`
+- `ADY_HEADLESS`
+- `ADY_BROWSER_CHANNEL`
+- `ADY_BROWSER_PROFILE_DIR`
+- `ADY_ARTIFACTS_DIR`
+- `ADY_BOT_MAX_CONCURRENT_CHECKS`
+- `ADY_BOT_MAX_DATES`
+- `ADY_BOT_MAX_PASSENGERS`
+- `ADY_BOT_STATIONS_PER_PAGE`
+- `ADY_BOT_STOP_ON_AVAILABLE`
+- `ADY_BOT_SCREENSHOTS_ENABLED`
+
 ## Telegram bot
 
 ```powershell
@@ -103,34 +121,10 @@ npm.cmd run check
 npm.cmd start
 ```
 
-CLI rejimində default sorğu `.env`-dən oxunur:
-
-```powershell
-ADY_FROM_EXACT=BAKI DYV
-ADY_TO_EXACT=TBİLİSİ-SƏRN
-ADY_TARGET_DATES=2026-08-01,2026-08-02,2026-08-03,2026-08-04
-ADY_ADULTS=3
-ADY_MAX_PRICE=87.72
-```
+CLI rejimi hələ qalır, amma Telegram bot axınında marşrut, tarixlər, sərnişin sayı və maksimum qiymət userdən soruşulduğu üçün bu dəyərlər artıq `.env`-də saxlanılmır.
 
 ## Static ADY filterləri
 
 Telegram botdakı stansiya siyahısı `src/modules/ady/stations.ts` içində statik saxlanılır. Siyahı ADY dropdown-dan scrape olunub və exact label-lar saxlanılıb ki, Playwright seçimi saytdakı real option text-lə işləsin.
-
-## WhatsApp testləri
-
-Köhnə WhatsApp testləri qalır:
-
-```powershell
-npm.cmd run whatsapp:test
-npm.cmd run simulate:found
-```
-
-WhatsApp üçün:
-
-```powershell
-ADY_WHATSAPP_ENABLED=true
-ADY_WHATSAPP_PHONE=994501234567
-```
 
 Qeyd: sayt Cloudflare istifadə edir. Ona görə browser default olaraq görünən rejimdə açılır (`ADY_HEADLESS=false`) və `.browser-profile` qovluğunda sessiyanı saxlayır.
