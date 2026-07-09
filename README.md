@@ -90,7 +90,7 @@ Uyğun bilet tapılanda bot istifadəçiyə mesaj göndərir:
 - sərnişin sayı
 - seçilən tarix
 - tapılan ən ucuz qiymət
-- `ticket.ady.az` linki
+- birbaşa bilet seçimi səhifəsinə aparan `ticket-search` linki
 
 Eyni sorğunu bir neçə user seçəndə ayrıca scrape açılmır. Sorğu fingerprint-i bunlardan ibarətdir:
 

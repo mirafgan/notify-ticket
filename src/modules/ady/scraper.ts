@@ -114,6 +114,7 @@ export interface TicketsFoundResult {
   message: string;
   cheapestPrice: number;
   prices: number[];
+  ticketSearchUrl?: string | null;
   screenshotPath?: string | null;
 }
 
@@ -125,6 +126,7 @@ export interface PriceSummaryResult {
   results?: CheckResult[];
   cheapestPrice?: number;
   prices?: number[];
+  ticketSearchUrl?: string | null;
   screenshotPath?: string | null;
 }
 
@@ -145,6 +147,7 @@ interface SearchOutcome {
   status: 'tickets-found';
   cheapestPrice: number;
   prices: number[];
+  ticketSearchUrl?: string | null;
 }
 
 type DateSelectionResult =
@@ -478,6 +481,7 @@ async function runCheck(
     status: 'tickets-found',
     cheapestPrice: result.cheapestPrice,
     prices: result.prices,
+    ticketSearchUrl: result.ticketSearchUrl,
     message: `${target.displayValue}: Bilet görünür. Ən ucuz qiymət ${formatPrice(result.cheapestPrice)} AZN.`,
     screenshotPath,
   };
@@ -595,6 +599,8 @@ async function setAdults(page: Page, adults: number): Promise<void> {
 async function submitSearch(page: Page, runtimeConfig: RuntimeConfig): Promise<SearchOutcome | 'sold-out' | 'unknown'> {
   const searchButton = page.locator('form.search__wrapper button.btn.btn-blue').filter({ hasText: 'Axtar' });
   await searchButton.waitFor({ state: 'visible', timeout: 30000 });
+  const ticketSearchUrlCapture = await createTicketSearchUrlCapture(page);
+  const ticketSearchUrlPromise = ticketSearchUrlCapture.waitForUrl(5000);
   await searchButton.click();
 
   const continueButton = page.locator('.popup.open button.btn.btn-blue').filter({ hasText: CONTINUE_TEXT });
@@ -605,7 +611,169 @@ async function submitSearch(page: Page, runtimeConfig: RuntimeConfig): Promise<S
     await continueButton.click();
   }
 
-  return waitForSearchOutcome(page, runtimeConfig);
+  const result = await waitForSearchOutcome(page, runtimeConfig);
+  try {
+    const ticketSearchUrl = await ticketSearchUrlPromise;
+    if (typeof result === 'object') {
+      return {
+        ...result,
+        ticketSearchUrl: ticketSearchUrl ?? await ticketSearchUrlCapture.getUrl(),
+      };
+    }
+  } finally {
+    ticketSearchUrlCapture.dispose();
+  }
+
+  return result;
+}
+
+interface TicketSearchUrlCapture {
+  waitForUrl(timeoutMs: number): Promise<string | null>;
+  getUrl(): Promise<string | null>;
+  dispose(): void;
+}
+
+async function createTicketSearchUrlCapture(page: Page): Promise<TicketSearchUrlCapture> {
+  let capturedUrl: string | null = null;
+  let resolveWaiter: ((url: string | null) => void) | null = null;
+  let timeout: NodeJS.Timeout | null = null;
+
+  const settle = (url: string | null) => {
+    if (!resolveWaiter) return;
+    if (timeout) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+
+    const resolve = resolveWaiter;
+    resolveWaiter = null;
+    resolve(url);
+  };
+
+  const captureUrl = (url: string) => {
+    if (!url.includes('/ticket-search/')) return;
+    capturedUrl = url;
+    settle(url);
+  };
+
+  const handleFrameNavigated = () => {
+    captureUrl(page.url());
+  };
+
+  const handleRequest = (request: { url(): string }) => {
+    captureUrl(request.url());
+  };
+
+  page.on('framenavigated', handleFrameNavigated);
+  page.on('request', handleRequest);
+  await resetInPageTicketSearchUrlCapture(page);
+
+  return {
+    waitForUrl(timeoutMs: number) {
+      if (capturedUrl) return Promise.resolve(capturedUrl);
+
+      const domWait = waitForInPageTicketSearchUrl(page, timeoutMs).then((url) => {
+        if (url) captureUrl(url);
+        return url;
+      });
+
+      const eventWait = new Promise<string | null>((resolve) => {
+        resolveWaiter = resolve;
+        timeout = setTimeout(async () => {
+          const domUrl = await getInPageCapturedTicketSearchUrl(page);
+          if (domUrl) {
+            capturedUrl = domUrl;
+          }
+          settle(capturedUrl);
+        }, timeoutMs);
+        timeout.unref?.();
+      });
+
+      return Promise.race([eventWait, domWait]).then((url) => url ?? capturedUrl);
+    },
+    getUrl() {
+      if (capturedUrl) return Promise.resolve(capturedUrl);
+      return getInPageCapturedTicketSearchUrl(page).then((url) => {
+        if (url) capturedUrl = url;
+        return capturedUrl;
+      });
+    },
+    dispose() {
+      page.off('framenavigated', handleFrameNavigated);
+      page.off('request', handleRequest);
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+      resolveWaiter = null;
+    },
+  };
+}
+
+async function resetInPageTicketSearchUrlCapture(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    type AdyWindow = Window & {
+      __adyTicketSearchUrl?: string | null;
+      __adyTicketSearchUrlPatched?: boolean;
+    };
+
+    const adyWindow = window as AdyWindow;
+    const capture = (url?: string | URL | null) => {
+      if (url == null) return;
+
+      try {
+        const absoluteUrl = new URL(String(url), window.location.href).href;
+        if (absoluteUrl.includes('/ticket-search/')) {
+          adyWindow.__adyTicketSearchUrl = absoluteUrl;
+        }
+      } catch {
+        // Ignore malformed transient router values.
+      }
+    };
+
+    if (!adyWindow.__adyTicketSearchUrlPatched) {
+      const pushState = history.pushState.bind(history);
+      const replaceState = history.replaceState.bind(history);
+
+      history.pushState = ((data: unknown, unused: string, url?: string | URL | null) => {
+        capture(url);
+        return pushState(data, unused, url);
+      }) as History['pushState'];
+
+      history.replaceState = ((data: unknown, unused: string, url?: string | URL | null) => {
+        capture(url);
+        return replaceState(data, unused, url);
+      }) as History['replaceState'];
+
+      adyWindow.__adyTicketSearchUrlPatched = true;
+    }
+
+    adyWindow.__adyTicketSearchUrl = null;
+  });
+}
+
+async function waitForInPageTicketSearchUrl(page: Page, timeoutMs: number): Promise<string | null> {
+  try {
+    const handle = await page.waitForFunction(
+      () => {
+        const adyWindow = window as Window & { __adyTicketSearchUrl?: string | null };
+        if (adyWindow.__adyTicketSearchUrl) return adyWindow.__adyTicketSearchUrl;
+        return false;
+      },
+      undefined,
+      { timeout: timeoutMs },
+    );
+    return await handle.jsonValue() as string;
+  } catch {
+    return null;
+  }
+}
+
+async function getInPageCapturedTicketSearchUrl(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const adyWindow = window as Window & { __adyTicketSearchUrl?: string | null };
+    return adyWindow.__adyTicketSearchUrl ?? null;
+  }).catch(() => null);
 }
 
 async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): Promise<SearchOutcome | 'sold-out' | 'unknown'> {
