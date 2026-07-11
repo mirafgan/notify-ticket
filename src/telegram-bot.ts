@@ -153,7 +153,7 @@ jobManager.on('checked', async (event: CheckedEvent) => {
       subscriber.chatId,
       buildNoTicketsMessage(event.job.request, event.batch, subscriber.maxPrice, event.nextCheckInMs),
     ).catch((error: Error) => {
-      console.error(`Telegram status mesajÄ± gÃ¶ndÉ™rilmÉ™di (${subscriber.chatId}): ${error.message}`);
+      console.error(`Telegram status mesajı göndərilmədi (${subscriber.chatId}): ${error.message}`);
     });
   }));
 });
@@ -501,21 +501,21 @@ function buildNoTicketsMessage(request: AdyRequest, batch: CheckBatch, maxPrice:
   const checkedDates = batch.results.map((result) => result.target.displayValue).join(', ');
 
   return [
-    'ADY axtarÄ±ÅŸÄ± edildi.',
+    'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
-    `TarixlÉ™r: ${checkedDates || request.targetDates.map((target) => target.displayValue).join(', ')}`,
-    `${request.adults} nÉ™fÉ™r, limit: ${formatPrice(maxPrice)} AZN`,
+    `Tarixlər: ${checkedDates || request.targetDates.map((target) => target.displayValue).join(', ')}`,
+    `${request.adults} nəfər, limit: ${formatPrice(maxPrice)} AZN`,
     '',
-    `UyÄŸun bilet tapÄ±lmadÄ±. ${formatRetryDelay(nextCheckInMs)} sonra yenidÉ™n cÉ™hd edilÉ™cÉ™k.`,
+    `Uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən cəhd ediləcək.`,
   ].join('\n');
 }
 
 function formatRetryDelay(delayMs: number): string {
   const totalSeconds = Math.max(1, Math.round(delayMs / 1000));
-  if (totalSeconds < 60) return `${totalSeconds} saniyÉ™`;
+  if (totalSeconds < 60) return `${totalSeconds} saniyə`;
 
   const minutes = Math.max(1, Math.round(totalSeconds / 60));
-  return `${minutes} dÉ™qiqÉ™`;
+  return `${minutes} dəqiqə`;
 }
 
 function buildRequest(session: BotSession) {
