@@ -74,6 +74,12 @@ export interface JobErrorEvent {
   error: unknown;
 }
 
+export interface CheckedEvent {
+  job: AdyJob;
+  batch: CheckBatch;
+  nextCheckInMs: number;
+}
+
 export class AdyJobManager extends EventEmitter {
   private readonly runtimeConfig: RuntimeConfig;
   private readonly maxConcurrentChecks: number;
@@ -256,7 +262,11 @@ export class AdyJobManager extends EventEmitter {
         log: (message) => this.log(`[ADY] ${message}`),
       });
       this.handleBatch(job, batch);
-      this.emit('checked', { job, batch });
+      this.emit('checked', {
+        job,
+        batch,
+        nextCheckInMs: this.runtimeConfig.intervalMs,
+      } satisfies CheckedEvent);
     } catch (error) {
       this.emit('job-error', { job, error } satisfies JobErrorEvent);
     } finally {

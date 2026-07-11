@@ -13,7 +13,7 @@ import {
   stationDisplay,
   type AdyStation,
 } from './modules/ady/stations';
-import { formatPrice } from './modules/ady/scraper';
+import { formatPrice, type AdyRequest, type CheckBatch, type TicketsFoundResult } from './modules/ady/scraper';
 import {
   buildCalendarKeyboard,
   currentMonthCursor,
@@ -22,7 +22,7 @@ import {
   toIsoDate,
   type CalendarCursor,
 } from './bot/calendar';
-import { AdyJobManager, type AvailableEvent, type JobErrorEvent } from './bot/job-manager';
+import { AdyJobManager, type AvailableEvent, type CheckedEvent, type JobErrorEvent } from './bot/job-manager';
 
 dotenv.config({ quiet: true });
 
@@ -141,6 +141,21 @@ jobManager.on('available', async (event: AvailableEvent) => {
   await bot.sendMessage(event.subscriber.chatId, event.message).catch((error: Error) => {
     console.error(`Telegram mesajı göndərilmədi (${event.subscriber.chatId}): ${error.message}`);
   });
+});
+
+jobManager.on('checked', async (event: CheckedEvent) => {
+  const subscribers = [...event.job.subscribers.values()];
+
+  await Promise.all(subscribers.map(async (subscriber) => {
+    if (hasMatchingTicket(event.batch, subscriber.maxPrice)) return;
+
+    await bot.sendMessage(
+      subscriber.chatId,
+      buildNoTicketsMessage(event.job.request, event.batch, subscriber.maxPrice, event.nextCheckInMs),
+    ).catch((error: Error) => {
+      console.error(`Telegram status mesajÄ± gÃ¶ndÉ™rilmÉ™di (${subscriber.chatId}): ${error.message}`);
+    });
+  }));
 });
 
 jobManager.on('job-error', ({ job, error }: JobErrorEvent) => {
@@ -474,6 +489,33 @@ async function startMonitoring(chatId: ChatId, user: User, session: BotSession):
     '',
     'Dayandırmaq üçün /stop yaz.',
   ].join('\n'));
+}
+
+function hasMatchingTicket(batch: CheckBatch, maxPrice: number): boolean {
+  return batch.results.some((result): result is TicketsFoundResult => (
+    result.status === 'tickets-found' && result.cheapestPrice <= maxPrice
+  ));
+}
+
+function buildNoTicketsMessage(request: AdyRequest, batch: CheckBatch, maxPrice: number, nextCheckInMs: number): string {
+  const checkedDates = batch.results.map((result) => result.target.displayValue).join(', ');
+
+  return [
+    'ADY axtarÄ±ÅŸÄ± edildi.',
+    `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
+    `TarixlÉ™r: ${checkedDates || request.targetDates.map((target) => target.displayValue).join(', ')}`,
+    `${request.adults} nÉ™fÉ™r, limit: ${formatPrice(maxPrice)} AZN`,
+    '',
+    `UyÄŸun bilet tapÄ±lmadÄ±. ${formatRetryDelay(nextCheckInMs)} sonra yenidÉ™n cÉ™hd edilÉ™cÉ™k.`,
+  ].join('\n');
+}
+
+function formatRetryDelay(delayMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(delayMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} saniyÉ™`;
+
+  const minutes = Math.max(1, Math.round(totalSeconds / 60));
+  return `${minutes} dÉ™qiqÉ™`;
 }
 
 function buildRequest(session: BotSession) {
