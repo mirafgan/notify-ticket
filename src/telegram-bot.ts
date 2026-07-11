@@ -36,6 +36,11 @@ dotenv.config({ quiet: true });
 type StationField = 'from' | 'to';
 type ChatId = number | string;
 type TicketTypeId = 'comfort' | 'luxury' | 'standard-plus';
+type TicketTypeOption = {
+  id: TicketTypeId;
+  label: string;
+  aliases: string[];
+};
 
 interface BotSession {
   service: 'ady';
@@ -68,10 +73,10 @@ const maxPassengers = positiveInteger(process.env.ADY_BOT_MAX_PASSENGERS, 10);
 const stationsPerPage = positiveInteger(process.env.ADY_BOT_STATIONS_PER_PAGE, 8);
 const ADY_FROM_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
 const ADY_TO_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
-const TICKET_TYPE_OPTIONS: Array<{ id: TicketTypeId; label: string }> = [
-  { id: 'comfort', label: 'Komfort' },
-  { id: 'luxury', label: 'Lüks' },
-  { id: 'standard-plus', label: 'Standart+' },
+const TICKET_TYPE_OPTIONS: TicketTypeOption[] = [
+  { id: 'comfort', label: 'Komfort+', aliases: ['Komfort', 'Komfort+'] },
+  { id: 'luxury', label: 'Lüks', aliases: ['Lüks'] },
+  { id: 'standard-plus', label: 'Standart+', aliases: ['Standart+'] },
 ];
 const BOT_COMMANDS: TelegramCommand[] = [
   { command: 'start', description: 'Bot menyusunu aç' },
@@ -408,7 +413,7 @@ async function handleTextMessage(message: Message): Promise<void> {
   if (session.step === 'ticketTypes') {
     const ticketTypeIds = parseTicketTypeText(text);
     if (ticketTypeIds.length === 0) {
-      await bot.sendMessage(chatId, 'Zal tipini seç: Komfort, Lüks və ya Standart+.');
+      await bot.sendMessage(chatId, 'Zal tipini seç: Komfort+, Lüks və ya Standart+.');
       await showTicketTypeSelector(chatId);
       return;
     }
@@ -611,8 +616,8 @@ function hasMatchingTicket(batch: CheckBatch, selectedTicketTypes: string[]): bo
 
 function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: string[]): boolean {
   if (selectedTicketTypes.length === 0) return true;
-  const selected = new Set(selectedTicketTypes.map(normalizeTicketType));
-  return availableTicketTypes.some((ticketType) => selected.has(normalizeTicketType(ticketType)));
+  const selected = new Set(selectedTicketTypes.map(canonicalTicketType));
+  return availableTicketTypes.some((ticketType) => selected.has(canonicalTicketType(ticketType)));
 }
 
 function buildNoTicketsMessage(
@@ -673,7 +678,7 @@ function parseTicketTypeId(value: string): TicketTypeId | null {
 function parseTicketTypeText(value: string): TicketTypeId[] {
   const normalizedValue = normalizeTicketType(value);
   return TICKET_TYPE_OPTIONS
-    .filter((ticketType) => normalizedValue.includes(normalizeTicketType(ticketType.label)))
+    .filter((ticketType) => ticketType.aliases.some((alias) => normalizedValue.includes(normalizeTicketType(alias))))
     .map((ticketType) => ticketType.id);
 }
 
@@ -704,7 +709,14 @@ function normalizeTicketType(value: string): string {
     .replace(/[üÜ]/g, 'u')
     .toLowerCase()
     .replace(/\s+/g, ' ')
+    .replace(/\s*\+\s*/g, '+')
     .trim();
+}
+
+function canonicalTicketType(value: string): string {
+  const normalized = normalizeTicketType(value);
+  if (normalized === 'komfort') return 'komfort+';
+  return normalized;
 }
 
 function formatRetryDelay(delayMs: number): string {

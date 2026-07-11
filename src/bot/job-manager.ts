@@ -405,8 +405,8 @@ function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: s
 }
 
 function matchingTicketTypes(availableTicketTypes: string[], selectedTicketTypes: string[]): string[] {
-  const selected = new Set(selectedTicketTypes.map(normalizeTicketType));
-  return availableTicketTypes.filter((ticketType) => selected.has(normalizeTicketType(ticketType)));
+  const selected = new Set(selectedTicketTypes.map(canonicalTicketType));
+  return availableTicketTypes.filter((ticketType) => selected.has(canonicalTicketType(ticketType)));
 }
 
 function normalizeTicketType(value: string): string {
@@ -422,7 +422,14 @@ function normalizeTicketType(value: string): string {
     .replace(/[üÜ]/g, 'u')
     .toLowerCase()
     .replace(/\s+/g, ' ')
+    .replace(/\s*\+\s*/g, '+')
     .trim();
+}
+
+function canonicalTicketType(value: string): string {
+  const normalized = normalizeTicketType(value);
+  if (normalized === 'komfort') return 'komfort+';
+  return normalized;
 }
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
