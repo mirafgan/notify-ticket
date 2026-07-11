@@ -52,6 +52,11 @@ interface ReplyMarkupOptions {
   reply_markup?: InlineKeyboardMarkup;
 }
 
+interface TelegramCommand {
+  command: string;
+  description: string;
+}
+
 const token = process.env.TELEGRAM_BOT_TOKEN || process.env.ADY_TELEGRAM_BOT_TOKEN;
 if (!token) {
   throw new Error('TELEGRAM_BOT_TOKEN .env faylında yazılmalıdır.');
@@ -67,6 +72,12 @@ const TICKET_TYPE_OPTIONS: Array<{ id: TicketTypeId; label: string }> = [
   { id: 'comfort', label: 'Komfort' },
   { id: 'luxury', label: 'Lüks' },
   { id: 'standard-plus', label: 'Standart+' },
+];
+const BOT_COMMANDS: TelegramCommand[] = [
+  { command: 'start', description: 'Bot menyusunu aç' },
+  { command: 'ady', description: 'ADY bilet axtarışına başla' },
+  { command: 'status', description: 'Aktiv monitorinqləri göstər' },
+  { command: 'stop', description: 'Monitorinqi dayandır' },
 ];
 
 const sessions = new Map<string, BotSession>();
@@ -193,7 +204,29 @@ jobManager.on('job-error', ({ job, error }: JobErrorEvent) => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+registerBotCommands().catch((error: unknown) => {
+  console.error(`Telegram command menyusu yenilənmədi: ${formatErrorMessage(error)}`);
+});
 console.log('Telegram bot işə düşdü.');
+
+async function registerBotCommands(): Promise<void> {
+  const response = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ commands: BOT_COMMANDS }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Telegram API ${response.status}: ${await response.text()}`);
+  }
+
+  const payload = await response.json() as { ok?: boolean; description?: string };
+  if (!payload.ok) {
+    throw new Error(payload.description || 'setMyCommands failed');
+  }
+
+  console.log('Telegram command menyusu yeniləndi.');
+}
 
 async function handleCallback(query: CallbackQuery, data: string): Promise<void> {
   const chatId = query.message?.chat.id;
