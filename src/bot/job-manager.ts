@@ -18,7 +18,7 @@ export interface AdySubscriber {
   chatId: string;
   userId: string | number;
   username: string;
-  maxPrice: number;
+  ticketTypes: string[];
   checksCompleted: number;
   maxChecks: number;
   createdAt: Date;
@@ -46,6 +46,7 @@ interface SubscriberInput {
   chatId: number | string;
   userId?: number | string;
   username?: string;
+  ticketTypes?: string[];
 }
 
 interface QueueItem {
@@ -134,7 +135,7 @@ export class AdyJobManager extends EventEmitter {
       chatId,
       userId: subscriberInput.userId ?? '',
       username: subscriberInput.username ?? '',
-      maxPrice: request.maxPrice,
+      ticketTypes: subscriberInput.ticketTypes ?? request.ticketTypes,
       checksCompleted: 0,
       maxChecks: this.maxChecksPerSubscription,
       createdAt: new Date(),
@@ -313,7 +314,7 @@ export class AdyJobManager extends EventEmitter {
   private handleBatch(job: AdyJob, batch: CheckBatch): void {
     for (const subscriber of [...job.subscribers.values()]) {
       const matches = batch.results
-        .filter((result): result is TicketsFoundResult => result.status === 'tickets-found' && result.cheapestPrice <= subscriber.maxPrice)
+        .filter((result): result is TicketsFoundResult => result.status === 'tickets-found' && ticketTypesMatch(result.ticketTypes, subscriber.ticketTypes))
         .sort((left, right) => left.cheapestPrice - right.cheapestPrice);
 
       if (matches.length === 0) continue;
@@ -322,7 +323,7 @@ export class AdyJobManager extends EventEmitter {
         job,
         subscriber,
         matches,
-        message: buildAvailableMessage(job.request, matches, subscriber.maxPrice),
+        message: buildAvailableMessage(job.request, matches, subscriber.ticketTypes),
       } satisfies AvailableEvent);
 
       if (this.stopOnAvailable) {
@@ -359,9 +360,12 @@ export class AdyJobManager extends EventEmitter {
   }
 }
 
-export function buildAvailableMessage(request: AdyRequest, matches: TicketsFoundResult[], maxPrice: number): string {
+export function buildAvailableMessage(request: AdyRequest, matches: TicketsFoundResult[], selectedTicketTypes: string[]): string {
   const lines = matches.flatMap((match) => {
-    const priceLine = `- ${match.target.displayValue}: ${formatPrice(match.cheapestPrice)} AZN`;
+    const matchingTypes = matchingTicketTypes(match.ticketTypes, selectedTicketTypes);
+    const typeText = matchingTypes.length > 0 ? matchingTypes.join(', ') : 'bilinmir';
+    const priceText = match.cheapestPrice > 0 ? `, ən ucuz qiymət: ${formatPrice(match.cheapestPrice)} AZN` : '';
+    const priceLine = `- ${match.target.displayValue}: ${typeText}${priceText}`;
     if (!match.ticketSearchUrl) return [priceLine];
     return [priceLine, `  Link: ${match.ticketSearchUrl}`];
   });
@@ -370,12 +374,38 @@ export function buildAvailableMessage(request: AdyRequest, matches: TicketsFound
   return [
     'ADY bileti hazır görünür.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
-    `${request.adults} nəfər, limit: ${formatPrice(maxPrice)} AZN`,
+    `${request.adults} nəfər, zal tipi: ${selectedTicketTypes.join(', ')}`,
     '',
     ...lines,
     '',
     hasDeepLink ? 'Linkə klikləyəndə birbaşa bilet seçimi səhifəsi açılmalıdır.' : 'Gir al: https://ticket.ady.az/',
   ].join('\n');
+}
+
+function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: string[]): boolean {
+  if (selectedTicketTypes.length === 0) return true;
+  return matchingTicketTypes(availableTicketTypes, selectedTicketTypes).length > 0;
+}
+
+function matchingTicketTypes(availableTicketTypes: string[], selectedTicketTypes: string[]): string[] {
+  const selected = new Set(selectedTicketTypes.map(normalizeTicketType));
+  return availableTicketTypes.filter((ticketType) => selected.has(normalizeTicketType(ticketType)));
+}
+
+function normalizeTicketType(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[əƏ]/g, 'e')
+    .replace(/[ıİ]/g, 'i')
+    .replace(/[ğĞ]/g, 'g')
+    .replace(/[şŞ]/g, 's')
+    .replace(/[çÇ]/g, 'c')
+    .replace(/[öÖ]/g, 'o')
+    .replace(/[üÜ]/g, 'u')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {

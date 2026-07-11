@@ -62,7 +62,7 @@ Bot axını:
 4. Haraya stansiyası
 5. Calendar üzərindən 1-4 arası gediş tarixi
 6. Sərnişin sayı
-7. Maksimum qiymət
+7. Zal tipi: Komfort, Lüks, Standart+
 8. Təsdiq
 
 Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. Sadəcə gediş tarixləri seçilir və bu seçim multi ola bilər, amma maksimum 4 gün seçilə bilər.
@@ -90,7 +90,8 @@ Uyğun bilet tapılanda bot istifadəçiyə mesaj göndərir:
 - marşrut
 - sərnişin sayı
 - seçilən tarix
-- tapılan ən ucuz qiymət
+- uyğun zal tipi
+- varsa tapılan ən ucuz qiymət
 - birbaşa bilet seçimi səhifəsinə aparan `ticket-search` linki
 
 Eyni sorğunu bir neçə user seçəndə ayrıca scrape açılmır. Sorğu fingerprint-i bunlardan ibarətdir:
@@ -100,7 +101,7 @@ Eyni sorğunu bir neçə user seçəndə ayrıca scrape açılmır. Sorğu finge
 - seçilən tarixlər
 - sərnişin sayı
 
-Maksimum qiymət fingerprint-ə daxil edilmir. Beləliklə eyni scrape nəticəsi fərqli max qiymətli user-lər üçün təkrar istifadə olunur.
+Zal tipi fingerprint-ə daxil edilmir. Beləliklə eyni scrape nəticəsi fərqli zal tipi seçən user-lər üçün təkrar istifadə olunur.
 
 ADY-yə yük düşməməsi üçün eyni anda işləyən unikal scrape sayı limitlənir:
 
@@ -128,7 +129,7 @@ npm.cmd run check
 npm.cmd start
 ```
 
-CLI rejimi hələ qalır, amma Telegram bot axınında marşrut, tarixlər, sərnişin sayı və maksimum qiymət userdən soruşulduğu üçün bu dəyərlər artıq `.env`-də saxlanılmır.
+CLI rejimi hələ qalır, amma Telegram bot axınında marşrut, tarixlər, sərnişin sayı və zal tipi userdən soruşulduğu üçün bu dəyərlər artıq `.env`-də saxlanılmır.
 
 ## Static ADY filterləri
 

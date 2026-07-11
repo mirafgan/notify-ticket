@@ -75,6 +75,7 @@ export interface AdyRequest {
   targetDates: TargetDate[];
   adults: number;
   maxPrice: number;
+  ticketTypes: string[];
 }
 
 export type StationInput = string | Partial<AdyStation> & {
@@ -93,6 +94,7 @@ export interface AdyRequestInput {
   targetDate?: string;
   adults?: number | string;
   maxPrice?: number | string;
+  ticketTypes?: string | string[];
 }
 
 export type DateSkippedStatus = 'date-not-loaded' | 'date-not-found' | 'date-disabled';
@@ -114,6 +116,7 @@ export interface TicketsFoundResult {
   message: string;
   cheapestPrice: number;
   prices: number[];
+  ticketTypes: string[];
   ticketSearchUrl?: string | null;
   screenshotPath?: string | null;
 }
@@ -147,6 +150,7 @@ interface SearchOutcome {
   status: 'tickets-found';
   cheapestPrice: number;
   prices: number[];
+  ticketTypes: string[];
   ticketSearchUrl?: string | null;
 }
 
@@ -210,6 +214,7 @@ export function normalizeRequest(input: AdyRequestInput | AdyRequest): AdyReques
   const targetDates = normalizeTargetDates(input);
   const adults = Number(input.adults);
   const maxPrice = Number(input.maxPrice);
+  const ticketTypes = normalizeTicketTypes(input.ticketTypes);
 
   if (!from.exact || !to.exact) {
     throw new Error('Haradan və haraya stansiyaları yazılmalıdır.');
@@ -233,7 +238,13 @@ export function normalizeRequest(input: AdyRequestInput | AdyRequest): AdyReques
     targetDates,
     adults,
     maxPrice,
+    ticketTypes,
   };
+}
+
+function normalizeTicketTypes(value: string | string[] | undefined): string[] {
+  const values = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 }
 
 function normalizeTargetDates(input: AdyRequestInput | AdyRequest): TargetDate[] {
@@ -475,14 +486,16 @@ async function runCheck(
   }
 
   const screenshotPath = await saveScreenshot(page, 'available', runtimeConfig);
+  const priceText = result.cheapestPrice > 0 ? ` Ən ucuz qiymət ${formatPrice(result.cheapestPrice)} AZN.` : '';
   return {
     ok: true,
     target,
     status: 'tickets-found',
     cheapestPrice: result.cheapestPrice,
     prices: result.prices,
+    ticketTypes: result.ticketTypes,
     ticketSearchUrl: result.ticketSearchUrl,
-    message: `${target.displayValue}: Bilet görünür. Ən ucuz qiymət ${formatPrice(result.cheapestPrice)} AZN.`,
+    message: `${target.displayValue}: Bilet görünür. Tip: ${formatTicketTypes(result.ticketTypes)}.${priceText}`,
     screenshotPath,
   };
 }
@@ -827,6 +840,15 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
           return [...new Set(prices)].sort((a, b) => a - b);
         };
 
+        const extractVisibleTicketTypes = () => {
+          const labels = [...document.querySelectorAll('.ticket__item .ticket__type li label nobr, .ticket__type li label nobr')]
+            .filter(isVisible)
+            .map((element) => elementText(element))
+            .filter(Boolean);
+
+          return [...new Set(labels)];
+        };
+
         const soldOutModal = [...document.querySelectorAll('.popup.open')].find(
           (element) => isVisible(element) && elementText(element).includes(soldOutText),
         );
@@ -838,11 +860,13 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
         const text = document.body.innerText || '';
         if (!loading && text.includes('Qatar seçimi')) {
           const prices = extractVisiblePrices();
-          if (prices.length > 0) {
+          const ticketTypes = extractVisibleTicketTypes();
+          if (prices.length > 0 || ticketTypes.length > 0) {
             return {
               status: 'tickets-found',
-              cheapestPrice: prices[0],
+              cheapestPrice: prices[0] ?? 0,
               prices,
+              ticketTypes,
             };
           }
         }
@@ -894,6 +918,10 @@ async function saveScreenshot(page: Page, prefix: string, runtimeConfig: Runtime
 
 export function formatPrice(value: number): string {
   return Number(value).toFixed(2);
+}
+
+function formatTicketTypes(ticketTypes: string[]): string {
+  return ticketTypes.length > 0 ? ticketTypes.join(', ') : 'bilinmir';
 }
 
 export async function delay(ms: number): Promise<void> {
