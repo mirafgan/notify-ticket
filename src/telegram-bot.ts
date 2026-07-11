@@ -189,7 +189,7 @@ jobManager.on('check-failed', async (event: CheckFailedEvent) => {
   await Promise.all(event.subscribers.map(async (subscriber) => {
     await bot.sendMessage(
       subscriber.chatId,
-      buildCheckFailedMessage(event.job.request, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId), event.error),
+      buildCheckFailedMessage(event.job.request, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
     ).catch((error: Error) => {
       console.error(`Telegram xeta status mesaji gonderilmedi (${subscriber.chatId}): ${error.message}`);
     });
@@ -644,22 +644,20 @@ function buildCheckFailedMessage(
   subscriber: AdySubscriber,
   nextCheckInMs: number,
   expired: boolean,
-  error: unknown,
 ): string {
   const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
   const retryLine = expired
-    ? 'Bu yoxlama cəhdi tamamlanmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
-    : `Bu yoxlama cəhdi tamamlanmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
+    ? 'Bu yoxlamanı etdim, uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `Bu yoxlamanı etdim, uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
 
   return [
-    'ADY yoxlama cəhdi edildi.',
+    'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
     `Tarixlər: ${request.targetDates.map((target) => target.displayValue).join(', ')}`,
     `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
     `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
     '',
     retryLine,
-    `Səbəb: ${formatErrorMessage(error)}`,
   ].join('\n');
 }
 

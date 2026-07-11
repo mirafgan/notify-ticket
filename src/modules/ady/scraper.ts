@@ -508,7 +508,7 @@ async function waitForHomeReady(page: Page, runtimeConfig: RuntimeConfig): Promi
     await form.waitFor({ state: 'visible', timeout: 90000 });
   } catch {
     const title = await page.title().catch(() => '');
-    throw new Error(`Axtarış formu açılmadı. Title: "${title}". Cloudflare yoxlaması varsa, görünən browserdə tamamla və yenidən işə sal.`);
+    throw new Error(`Axtarış formu açılmadı. Title: "${title}".`);
   }
 }
 
