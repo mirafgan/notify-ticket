@@ -78,6 +78,14 @@ export interface JobErrorEvent {
   error: unknown;
 }
 
+export interface CheckFailedEvent {
+  job: AdyJob;
+  error: unknown;
+  nextCheckInMs: number;
+  subscribers: AdySubscriber[];
+  expiredSubscribers: AdySubscriber[];
+}
+
 export interface CheckedEvent {
   job: AdyJob;
   batch: CheckBatch;
@@ -285,7 +293,16 @@ export class AdyJobManager extends EventEmitter {
       } satisfies CheckedEvent);
       this.removeExpiredSubscribers(job, expiredSubscribers);
     } catch (error) {
+      const expiredSubscribers = this.markCheckCompleted(job);
       this.emit('job-error', { job, error } satisfies JobErrorEvent);
+      this.emit('check-failed', {
+        job,
+        error,
+        nextCheckInMs: this.runtimeConfig.intervalMs,
+        subscribers: [...job.subscribers.values()],
+        expiredSubscribers,
+      } satisfies CheckFailedEvent);
+      this.removeExpiredSubscribers(job, expiredSubscribers);
     } finally {
       if (page) {
         await page.close().catch(() => {});

@@ -26,6 +26,7 @@ import {
   AdyJobManager,
   type AdySubscriber,
   type AvailableEvent,
+  type CheckFailedEvent,
   type CheckedEvent,
   type JobErrorEvent,
 } from './bot/job-manager';
@@ -167,6 +168,19 @@ jobManager.on('checked', async (event: CheckedEvent) => {
       buildNoTicketsMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
     ).catch((error: Error) => {
       console.error(`Telegram status mesajı göndərilmədi (${subscriber.chatId}): ${error.message}`);
+    });
+  }));
+});
+
+jobManager.on('check-failed', async (event: CheckFailedEvent) => {
+  const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
+
+  await Promise.all(event.subscribers.map(async (subscriber) => {
+    await bot.sendMessage(
+      subscriber.chatId,
+      buildCheckFailedMessage(event.job.request, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId), event.error),
+    ).catch((error: Error) => {
+      console.error(`Telegram xeta status mesaji gonderilmedi (${subscriber.chatId}): ${error.message}`);
     });
   }));
 });
@@ -578,8 +592,8 @@ function buildNoTicketsMessage(
   const checkedDates = batch.results.map((result) => result.target.displayValue).join(', ');
   const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
   const retryLine = expired
-    ? 'Uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
-    : `Uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən cəhd ediləcək. Qalan yoxlama sayı: ${remainingChecks}.`;
+    ? 'Bu yoxlamanı etdim, uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `Bu yoxlamanı etdim, uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
 
   return [
     'ADY axtarışı edildi.',
@@ -590,6 +604,35 @@ function buildNoTicketsMessage(
     '',
     retryLine,
   ].join('\n');
+}
+
+function buildCheckFailedMessage(
+  request: AdyRequest,
+  subscriber: AdySubscriber,
+  nextCheckInMs: number,
+  expired: boolean,
+  error: unknown,
+): string {
+  const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
+  const retryLine = expired
+    ? 'Bu yoxlama cəhdi tamamlanmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `Bu yoxlama cəhdi tamamlanmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
+
+  return [
+    'ADY yoxlama cəhdi edildi.',
+    `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
+    `Tarixlər: ${request.targetDates.map((target) => target.displayValue).join(', ')}`,
+    `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
+    '',
+    retryLine,
+    `Səbəb: ${formatErrorMessage(error)}`,
+  ].join('\n');
+}
+
+function formatErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 140 ? `${message.slice(0, 137)}...` : message;
 }
 
 function parseTicketTypeId(value: string): TicketTypeId | null {
