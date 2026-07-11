@@ -1,0 +1,18 @@
+services:
+  ady-ticket-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ady-ticket-bot:latest
+    container_name: ady-ticket-bot
+    restart: unless-stopped
+    init: true
+    env_file:
+      - /opt/ady-ticket-bot/.env
+    environment:
+      NODE_ENV: production
+      ADY_BROWSER_PROFILE_DIR: /data/browser-profile
+      ADY_ARTIFACTS_DIR: /data/artifacts
+    volumes:
+      - /opt/ady-ticket-bot/data/browser-profile:/data/browser-profile
+      - /opt/ady-ticket-bot/data/artifacts:/data/artifacts

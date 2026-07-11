@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.agents
+.codex
+
+node_modules
+dist
+tsconfig.tsbuildinfo
+npm-debug.log*
+
+.env
+.browser-profile
+.whatsapp-profile
+artifacts

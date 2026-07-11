@@ -128,3 +128,32 @@ CLI rejimi hələ qalır, amma Telegram bot axınında marşrut, tarixlər, sər
 Telegram botdakı stansiya siyahısı `src/modules/ady/stations.ts` içində statik saxlanılır. Siyahı ADY dropdown-dan scrape olunub və exact label-lar saxlanılıb ki, Playwright seçimi saytdakı real option text-lə işləsin.
 
 Qeyd: sayt Cloudflare istifadə edir. Ona görə browser default olaraq görünən rejimdə açılır (`ADY_HEADLESS=false`) və `.browser-profile` qovluğunda sessiyanı saxlayır.
+
+## Docker deploy
+
+Server layout:
+
+```text
+/opt/ady-ticket-bot/
+  .env
+  app/
+  data/
+    browser-profile/
+    artifacts/
+```
+
+Manual run on the server:
+
+```bash
+cd /opt/ady-ticket-bot/app
+docker compose --env-file /opt/ady-ticket-bot/.env up -d --build
+docker compose logs -f ady-ticket-bot
+```
+
+GitHub Actions deploy needs these repository secrets:
+
+- `DEPLOY_HOST` - server IP, for example `169.58.0.129`
+- `DEPLOY_USER` - usually `root`
+- `DEPLOY_SSH_KEY` - private key contents for `C:\Users\Mirafgan\.ssh\ady_bot_169_58_0_129.pem`
+
+Keep Telegram and ADY runtime settings only on the server in `/opt/ady-ticket-bot/.env`.

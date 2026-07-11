@@ -1,0 +1,83 @@
+name: Deploy ADY Bot
+
+on:
+  push:
+    branches:
+      - main
+      - feature/telegram-bot-ady
+  workflow_dispatch:
+
+concurrency:
+  group: ady-ticket-bot-deploy
+  cancel-in-progress: true
+
+env:
+  DEPLOY_PATH: /opt/ady-ticket-bot
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Typecheck and build
+        run: |
+          npm run typecheck
+          npm run build
+
+      - name: Configure SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_SSH_KEY"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          {
+            echo "DEPLOY_HOST=$DEPLOY_HOST"
+            echo "DEPLOY_USER=${DEPLOY_USER:-root}"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload source to server
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH/app' '$DEPLOY_PATH/data/browser-profile' '$DEPLOY_PATH/data/artifacts' && chown -R 1001:1001 '$DEPLOY_PATH/data'"
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude 'node_modules' \
+            --exclude 'dist' \
+            --exclude '.browser-profile' \
+            --exclude '.whatsapp-profile' \
+            --exclude 'artifacts' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/app/"
+
+      - name: Deploy container
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "set -e
+            test -s '$DEPLOY_PATH/.env' || { echo 'Missing $DEPLOY_PATH/.env on server'; exit 1; }
+            cd '$DEPLOY_PATH/app'
+            docker compose --env-file '$DEPLOY_PATH/.env' up -d --build --remove-orphans
+            docker image prune -f
+            docker compose ps
+          "
