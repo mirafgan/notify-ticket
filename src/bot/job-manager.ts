@@ -19,6 +19,8 @@ export interface AdySubscriber {
   userId: string | number;
   username: string;
   maxPrice: number;
+  checksCompleted: number;
+  maxChecks: number;
   createdAt: Date;
 }
 
@@ -35,6 +37,7 @@ export interface AdyJob {
 interface AdyJobManagerOptions {
   runtimeConfig?: Partial<RuntimeConfig>;
   maxConcurrentChecks?: number | string;
+  maxChecksPerSubscription?: number | string;
   stopOnAvailable?: boolean;
   log?: (message: string) => void;
 }
@@ -78,11 +81,14 @@ export interface CheckedEvent {
   job: AdyJob;
   batch: CheckBatch;
   nextCheckInMs: number;
+  subscribers: AdySubscriber[];
+  expiredSubscribers: AdySubscriber[];
 }
 
 export class AdyJobManager extends EventEmitter {
   private readonly runtimeConfig: RuntimeConfig;
   private readonly maxConcurrentChecks: number;
+  private readonly maxChecksPerSubscription: number;
   private readonly stopOnAvailable: boolean;
   private readonly jobs = new Map<string, AdyJob>();
   private readonly queue: QueueItem[] = [];
@@ -95,6 +101,10 @@ export class AdyJobManager extends EventEmitter {
     super();
     this.runtimeConfig = buildRuntimeConfig(process.env, options.runtimeConfig ?? {});
     this.maxConcurrentChecks = positiveInteger(options.maxConcurrentChecks ?? process.env.ADY_BOT_MAX_CONCURRENT_CHECKS, 2);
+    this.maxChecksPerSubscription = positiveInteger(
+      options.maxChecksPerSubscription ?? process.env.ADY_BOT_MAX_CHECKS_PER_SUBSCRIPTION,
+      24,
+    );
     this.stopOnAvailable = options.stopOnAvailable ?? parseBoolean(process.env.ADY_BOT_STOP_ON_AVAILABLE, true);
     this.log = options.log ?? ((message) => console.log(message));
   }
@@ -125,6 +135,8 @@ export class AdyJobManager extends EventEmitter {
       userId: subscriberInput.userId ?? '',
       username: subscriberInput.username ?? '',
       maxPrice: request.maxPrice,
+      checksCompleted: 0,
+      maxChecks: this.maxChecksPerSubscription,
       createdAt: new Date(),
     });
 
@@ -262,11 +274,15 @@ export class AdyJobManager extends EventEmitter {
         log: (message) => this.log(`[ADY] ${message}`),
       });
       this.handleBatch(job, batch);
+      const expiredSubscribers = this.markCheckCompleted(job);
       this.emit('checked', {
         job,
         batch,
         nextCheckInMs: this.runtimeConfig.intervalMs,
+        subscribers: [...job.subscribers.values()],
+        expiredSubscribers,
       } satisfies CheckedEvent);
+      this.removeExpiredSubscribers(job, expiredSubscribers);
     } catch (error) {
       this.emit('job-error', { job, error } satisfies JobErrorEvent);
     } finally {
@@ -312,6 +328,29 @@ export class AdyJobManager extends EventEmitter {
       if (this.stopOnAvailable) {
         job.subscribers.delete(String(subscriber.chatId));
       }
+    }
+
+    if (job.subscribers.size === 0) {
+      this.stopJob(job.key);
+    }
+  }
+
+  private markCheckCompleted(job: AdyJob): AdySubscriber[] {
+    const expiredSubscribers: AdySubscriber[] = [];
+
+    for (const subscriber of job.subscribers.values()) {
+      subscriber.checksCompleted += 1;
+      if (subscriber.checksCompleted >= subscriber.maxChecks) {
+        expiredSubscribers.push(subscriber);
+      }
+    }
+
+    return expiredSubscribers;
+  }
+
+  private removeExpiredSubscribers(job: AdyJob, expiredSubscribers: AdySubscriber[]): void {
+    for (const subscriber of expiredSubscribers) {
+      job.subscribers.delete(subscriber.chatId);
     }
 
     if (job.subscribers.size === 0) {

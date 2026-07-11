@@ -41,6 +41,7 @@ Bot üçün `.env`-də saxlanan parametrlər:
 - `ADY_BROWSER_PROFILE_DIR`
 - `ADY_ARTIFACTS_DIR`
 - `ADY_BOT_MAX_CONCURRENT_CHECKS`
+- `ADY_BOT_MAX_CHECKS_PER_SUBSCRIPTION`
 - `ADY_BOT_MAX_DATES`
 - `ADY_BOT_MAX_PASSENGERS`
 - `ADY_BOT_STATIONS_PER_PAGE`
@@ -105,6 +106,12 @@ ADY-yə yük düşməməsi üçün eyni anda işləyən unikal scrape sayı limi
 
 ```powershell
 ADY_BOT_MAX_CONCURRENT_CHECKS=2
+```
+
+Hər user abunəliyi üçün maksimum yoxlama sayı da limitlənir. Default `24` yoxlamadır. Default 5 dəqiqəlik interval ilə bu təxminən 2 saat edir:
+
+```powershell
+ADY_BOT_MAX_CHECKS_PER_SUBSCRIPTION=24
 ```
 
 ## CLI monitor

@@ -22,7 +22,13 @@ import {
   toIsoDate,
   type CalendarCursor,
 } from './bot/calendar';
-import { AdyJobManager, type AvailableEvent, type CheckedEvent, type JobErrorEvent } from './bot/job-manager';
+import {
+  AdyJobManager,
+  type AdySubscriber,
+  type AvailableEvent,
+  type CheckedEvent,
+  type JobErrorEvent,
+} from './bot/job-manager';
 
 dotenv.config({ quiet: true });
 
@@ -100,6 +106,7 @@ bot.onText(/^\/status\b/, async (message: Message) => {
       `${index + 1}. ${job.request.from.label} -> ${job.request.to.label}`,
       `Tək gediş tarixləri: ${job.request.targetDates.map((target) => target.iso).join(', ')}`,
       `Sərnişin: ${job.request.adults}, limit: ${formatPrice(subscriber.maxPrice)} AZN`,
+      `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
       `Son yoxlama: ${lastRun}`,
     ].join('\n');
   });
@@ -144,14 +151,14 @@ jobManager.on('available', async (event: AvailableEvent) => {
 });
 
 jobManager.on('checked', async (event: CheckedEvent) => {
-  const subscribers = [...event.job.subscribers.values()];
+  const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
 
-  await Promise.all(subscribers.map(async (subscriber) => {
+  await Promise.all(event.subscribers.map(async (subscriber) => {
     if (hasMatchingTicket(event.batch, subscriber.maxPrice)) return;
 
     await bot.sendMessage(
       subscriber.chatId,
-      buildNoTicketsMessage(event.job.request, event.batch, subscriber.maxPrice, event.nextCheckInMs),
+      buildNoTicketsMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
     ).catch((error: Error) => {
       console.error(`Telegram status mesajı göndərilmədi (${subscriber.chatId}): ${error.message}`);
     });
@@ -485,6 +492,7 @@ async function startMonitoring(chatId: ChatId, user: User, session: BotSession):
     `${request.from.label} -> ${request.to.label}`,
     `Tək gediş tarixləri: ${request.targetDates.join(', ')}`,
     `Sərnişin: ${request.adults}, limit: ${formatPrice(request.maxPrice)} AZN`,
+    `Axtarış limiti: ${subscription.job.subscribers.get(String(chatId))?.maxChecks ?? 24} yoxlama`,
     `Aktiv subscriber sayı: ${subscription.subscriberCount}`,
     '',
     'Dayandırmaq üçün /stop yaz.',
@@ -497,16 +505,27 @@ function hasMatchingTicket(batch: CheckBatch, maxPrice: number): boolean {
   ));
 }
 
-function buildNoTicketsMessage(request: AdyRequest, batch: CheckBatch, maxPrice: number, nextCheckInMs: number): string {
+function buildNoTicketsMessage(
+  request: AdyRequest,
+  batch: CheckBatch,
+  subscriber: AdySubscriber,
+  nextCheckInMs: number,
+  expired: boolean,
+): string {
   const checkedDates = batch.results.map((result) => result.target.displayValue).join(', ');
+  const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
+  const retryLine = expired
+    ? 'Uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `Uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən cəhd ediləcək. Qalan yoxlama sayı: ${remainingChecks}.`;
 
   return [
     'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
     `Tarixlər: ${checkedDates || request.targetDates.map((target) => target.displayValue).join(', ')}`,
-    `${request.adults} nəfər, limit: ${formatPrice(maxPrice)} AZN`,
+    `${request.adults} nəfər, limit: ${formatPrice(subscriber.maxPrice)} AZN`,
+    `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
     '',
-    `Uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən cəhd ediləcək.`,
+    retryLine,
   ].join('\n');
 }
 
