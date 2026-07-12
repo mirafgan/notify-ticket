@@ -40,6 +40,8 @@ Bot üçün `.env`-də saxlanan parametrlər:
 - `ADY_BROWSER_CHANNEL`
 - `ADY_BROWSER_PROFILE_DIR`
 - `ADY_ARTIFACTS_DIR`
+- `ADY_PAGE_DIAGNOSTICS_ENABLED`
+- `ADY_PAGE_DIAGNOSTICS_TEXT_LIMIT`
 - `ADY_BOT_MAX_CONCURRENT_CHECKS`
 - `ADY_BOT_MAX_CHECKS_PER_SUBSCRIPTION`
 - `ADY_BOT_MAX_DATES`
@@ -157,6 +159,8 @@ cd /opt/ady-ticket-bot/app
 docker compose --env-file /opt/ady-ticket-bot/.env up -d --build
 docker compose logs -f ady-ticket-bot
 ```
+
+Səhifə açılmasa, nəticə bilinməsə və ya ADY formu görünməsə, Docker loglarında `[ADY diagnostic:...]` sətirləri çıxır. Bu loglarda cari URL, title, search formun görünməsi, Cloudflare siqnalları, body text-in qısa hissəsi və diagnostic screenshot path-i görünür. Lazım olsa server `.env`-də `ADY_PAGE_DIAGNOSTICS_ENABLED=false` ilə söndürmək olar.
 
 GitHub Actions deploy needs these repository secrets:
 
