@@ -18,7 +18,9 @@ export interface AdySubscriber {
   chatId: string;
   userId: string | number;
   username: string;
-  maxPrice: number;
+  ticketTypes: string[];
+  checksCompleted: number;
+  maxChecks: number;
   createdAt: Date;
 }
 
@@ -27,6 +29,8 @@ export interface AdyJob {
   request: AdyRequest;
   subscribers: Map<string, AdySubscriber>;
   timer: NodeJS.Timeout | null;
+  running: boolean;
+  pendingImmediateRun: boolean;
   stopped: boolean;
   lastRunAt: Date | null;
   createdAt: Date;
@@ -35,6 +39,7 @@ export interface AdyJob {
 interface AdyJobManagerOptions {
   runtimeConfig?: Partial<RuntimeConfig>;
   maxConcurrentChecks?: number | string;
+  maxChecksPerSubscription?: number | string;
   stopOnAvailable?: boolean;
   log?: (message: string) => void;
 }
@@ -43,6 +48,7 @@ interface SubscriberInput {
   chatId: number | string;
   userId?: number | string;
   username?: string;
+  ticketTypes?: string[];
 }
 
 interface QueueItem {
@@ -74,15 +80,26 @@ export interface JobErrorEvent {
   error: unknown;
 }
 
+export interface CheckFailedEvent {
+  job: AdyJob;
+  error: unknown;
+  nextCheckInMs: number;
+  subscribers: AdySubscriber[];
+  expiredSubscribers: AdySubscriber[];
+}
+
 export interface CheckedEvent {
   job: AdyJob;
   batch: CheckBatch;
   nextCheckInMs: number;
+  subscribers: AdySubscriber[];
+  expiredSubscribers: AdySubscriber[];
 }
 
 export class AdyJobManager extends EventEmitter {
   private readonly runtimeConfig: RuntimeConfig;
   private readonly maxConcurrentChecks: number;
+  private readonly maxChecksPerSubscription: number;
   private readonly stopOnAvailable: boolean;
   private readonly jobs = new Map<string, AdyJob>();
   private readonly queue: QueueItem[] = [];
@@ -95,6 +112,10 @@ export class AdyJobManager extends EventEmitter {
     super();
     this.runtimeConfig = buildRuntimeConfig(process.env, options.runtimeConfig ?? {});
     this.maxConcurrentChecks = positiveInteger(options.maxConcurrentChecks ?? process.env.ADY_BOT_MAX_CONCURRENT_CHECKS, 2);
+    this.maxChecksPerSubscription = positiveInteger(
+      options.maxChecksPerSubscription ?? process.env.ADY_BOT_MAX_CHECKS_PER_SUBSCRIPTION,
+      24,
+    );
     this.stopOnAvailable = options.stopOnAvailable ?? parseBoolean(process.env.ADY_BOT_STOP_ON_AVAILABLE, true);
     this.log = options.log ?? ((message) => console.log(message));
   }
@@ -111,12 +132,13 @@ export class AdyJobManager extends EventEmitter {
         request,
         subscribers: new Map(),
         timer: null,
+        running: false,
+        pendingImmediateRun: false,
         stopped: false,
         lastRunAt: null,
         createdAt: new Date(),
       };
       this.jobs.set(key, job);
-      this.schedule(job, 0);
     }
 
     const chatId = String(subscriberInput.chatId);
@@ -124,9 +146,19 @@ export class AdyJobManager extends EventEmitter {
       chatId,
       userId: subscriberInput.userId ?? '',
       username: subscriberInput.username ?? '',
-      maxPrice: request.maxPrice,
+      ticketTypes: subscriberInput.ticketTypes ?? request.ticketTypes,
+      checksCompleted: 0,
+      maxChecks: this.maxChecksPerSubscription,
       createdAt: new Date(),
     });
+
+    if (created) {
+      this.schedule(job, 0);
+    } else if (job.running) {
+      job.pendingImmediateRun = true;
+    } else {
+      this.schedule(job, 0);
+    }
 
     return {
       created,
@@ -212,13 +244,22 @@ export class AdyJobManager extends EventEmitter {
       return;
     }
 
-    await this.runWithLimit(async () => {
-      if (job.stopped || job.subscribers.size === 0) return null;
-      return this.checkJob(job);
-    });
+    const runSubscriberIds = new Set(job.subscribers.keys());
+    job.running = true;
+
+    try {
+      await this.runWithLimit(async () => {
+        if (job.stopped || job.subscribers.size === 0) return null;
+        return this.checkJob(job, runSubscriberIds);
+      });
+    } finally {
+      job.running = false;
+    }
 
     if (!job.stopped && job.subscribers.size > 0) {
-      this.schedule(job, this.runtimeConfig.intervalMs);
+      const delayMs = job.pendingImmediateRun ? 0 : this.runtimeConfig.intervalMs;
+      job.pendingImmediateRun = false;
+      this.schedule(job, delayMs);
     }
   }
 
@@ -249,7 +290,7 @@ export class AdyJobManager extends EventEmitter {
     }
   }
 
-  private async checkJob(job: AdyJob): Promise<void> {
+  private async checkJob(job: AdyJob, runSubscriberIds: Set<string>): Promise<void> {
     let page: Page | null = null;
 
     try {
@@ -261,14 +302,27 @@ export class AdyJobManager extends EventEmitter {
         ...this.runtimeConfig,
         log: (message) => this.log(`[ADY] ${message}`),
       });
-      this.handleBatch(job, batch);
+      this.handleBatch(job, batch, runSubscriberIds);
+      const expiredSubscribers = this.markCheckCompleted(job, runSubscriberIds);
       this.emit('checked', {
         job,
         batch,
         nextCheckInMs: this.runtimeConfig.intervalMs,
+        subscribers: this.getRunSubscribers(job, runSubscriberIds),
+        expiredSubscribers,
       } satisfies CheckedEvent);
+      this.removeExpiredSubscribers(job, expiredSubscribers);
     } catch (error) {
+      const expiredSubscribers = this.markCheckCompleted(job, runSubscriberIds);
       this.emit('job-error', { job, error } satisfies JobErrorEvent);
+      this.emit('check-failed', {
+        job,
+        error,
+        nextCheckInMs: this.runtimeConfig.intervalMs,
+        subscribers: this.getRunSubscribers(job, runSubscriberIds),
+        expiredSubscribers,
+      } satisfies CheckFailedEvent);
+      this.removeExpiredSubscribers(job, expiredSubscribers);
     } finally {
       if (page) {
         await page.close().catch(() => {});
@@ -294,10 +348,12 @@ export class AdyJobManager extends EventEmitter {
     return this.contextPromise;
   }
 
-  private handleBatch(job: AdyJob, batch: CheckBatch): void {
+  private handleBatch(job: AdyJob, batch: CheckBatch, runSubscriberIds: Set<string>): void {
     for (const subscriber of [...job.subscribers.values()]) {
+      if (!runSubscriberIds.has(subscriber.chatId)) continue;
+
       const matches = batch.results
-        .filter((result): result is TicketsFoundResult => result.status === 'tickets-found' && result.cheapestPrice <= subscriber.maxPrice)
+        .filter((result): result is TicketsFoundResult => result.status === 'tickets-found' && ticketTypesMatch(result.ticketTypes, subscriber.ticketTypes))
         .sort((left, right) => left.cheapestPrice - right.cheapestPrice);
 
       if (matches.length === 0) continue;
@@ -306,7 +362,7 @@ export class AdyJobManager extends EventEmitter {
         job,
         subscriber,
         matches,
-        message: buildAvailableMessage(job.request, matches, subscriber.maxPrice),
+        message: buildAvailableMessage(job.request, matches, subscriber.ticketTypes),
       } satisfies AvailableEvent);
 
       if (this.stopOnAvailable) {
@@ -318,11 +374,43 @@ export class AdyJobManager extends EventEmitter {
       this.stopJob(job.key);
     }
   }
+
+  private markCheckCompleted(job: AdyJob, runSubscriberIds: Set<string>): AdySubscriber[] {
+    const expiredSubscribers: AdySubscriber[] = [];
+
+    for (const subscriber of job.subscribers.values()) {
+      if (!runSubscriberIds.has(subscriber.chatId)) continue;
+
+      subscriber.checksCompleted += 1;
+      if (subscriber.checksCompleted >= subscriber.maxChecks) {
+        expiredSubscribers.push(subscriber);
+      }
+    }
+
+    return expiredSubscribers;
+  }
+
+  private getRunSubscribers(job: AdyJob, runSubscriberIds: Set<string>): AdySubscriber[] {
+    return [...job.subscribers.values()].filter((subscriber) => runSubscriberIds.has(subscriber.chatId));
+  }
+
+  private removeExpiredSubscribers(job: AdyJob, expiredSubscribers: AdySubscriber[]): void {
+    for (const subscriber of expiredSubscribers) {
+      job.subscribers.delete(subscriber.chatId);
+    }
+
+    if (job.subscribers.size === 0) {
+      this.stopJob(job.key);
+    }
+  }
 }
 
-export function buildAvailableMessage(request: AdyRequest, matches: TicketsFoundResult[], maxPrice: number): string {
+export function buildAvailableMessage(request: AdyRequest, matches: TicketsFoundResult[], selectedTicketTypes: string[]): string {
   const lines = matches.flatMap((match) => {
-    const priceLine = `- ${match.target.displayValue}: ${formatPrice(match.cheapestPrice)} AZN`;
+    const matchingTypes = matchingTicketTypes(match.ticketTypes, selectedTicketTypes);
+    const typeText = matchingTypes.length > 0 ? matchingTypes.join(', ') : 'bilinmir';
+    const priceText = match.cheapestPrice > 0 ? `, ən ucuz qiymət: ${formatPrice(match.cheapestPrice)} AZN` : '';
+    const priceLine = `- ${match.target.displayValue}: ${typeText}${priceText}`;
     if (!match.ticketSearchUrl) return [priceLine];
     return [priceLine, `  Link: ${match.ticketSearchUrl}`];
   });
@@ -331,12 +419,39 @@ export function buildAvailableMessage(request: AdyRequest, matches: TicketsFound
   return [
     'ADY bileti hazır görünür.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
-    `${request.adults} nəfər, limit: ${formatPrice(maxPrice)} AZN`,
+    `${request.adults} nəfər, zal tipi: ${selectedTicketTypes.join(', ')}`,
     '',
     ...lines,
     '',
     hasDeepLink ? 'Linkə klikləyəndə birbaşa bilet seçimi səhifəsi açılmalıdır.' : 'Gir al: https://ticket.ady.az/',
   ].join('\n');
+}
+
+function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: string[]): boolean {
+  if (selectedTicketTypes.length === 0) return true;
+  return matchingTicketTypes(availableTicketTypes, selectedTicketTypes).length > 0;
+}
+
+function matchingTicketTypes(availableTicketTypes: string[], selectedTicketTypes: string[]): string[] {
+  const selected = new Set(selectedTicketTypes.map(normalizeTicketType));
+  return availableTicketTypes.filter((ticketType) => selected.has(normalizeTicketType(ticketType)));
+}
+
+function normalizeTicketType(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[əƏ]/g, 'e')
+    .replace(/[ıİ]/g, 'i')
+    .replace(/[ğĞ]/g, 'g')
+    .replace(/[şŞ]/g, 's')
+    .replace(/[çÇ]/g, 'c')
+    .replace(/[öÖ]/g, 'o')
+    .replace(/[üÜ]/g, 'u')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*\+\s*/g, '+')
+    .trim();
 }
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {

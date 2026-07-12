@@ -47,6 +47,8 @@ export interface RuntimeConfig {
   browserChannel: string;
   browserProfileDir: string;
   screenshotsEnabled: boolean;
+  pageDiagnosticsEnabled: boolean;
+  pageDiagnosticsTextLimit: number;
   artifactsDir: string;
   log?: LogFn;
 }
@@ -75,6 +77,7 @@ export interface AdyRequest {
   targetDates: TargetDate[];
   adults: number;
   maxPrice: number;
+  ticketTypes: string[];
 }
 
 export type StationInput = string | Partial<AdyStation> & {
@@ -93,6 +96,7 @@ export interface AdyRequestInput {
   targetDate?: string;
   adults?: number | string;
   maxPrice?: number | string;
+  ticketTypes?: string | string[];
 }
 
 export type DateSkippedStatus = 'date-not-loaded' | 'date-not-found' | 'date-disabled';
@@ -114,6 +118,7 @@ export interface TicketsFoundResult {
   message: string;
   cheapestPrice: number;
   prices: number[];
+  ticketTypes: string[];
   ticketSearchUrl?: string | null;
   screenshotPath?: string | null;
 }
@@ -147,6 +152,7 @@ interface SearchOutcome {
   status: 'tickets-found';
   cheapestPrice: number;
   prices: number[];
+  ticketTypes: string[];
   ticketSearchUrl?: string | null;
 }
 
@@ -177,6 +183,8 @@ export function buildRuntimeConfig(
     browserChannel: env.ADY_BROWSER_CHANNEL || '',
     browserProfileDir: env.ADY_BROWSER_PROFILE_DIR || '.browser-profile',
     screenshotsEnabled: parseBoolean(env.ADY_SCREENSHOTS_ENABLED, true),
+    pageDiagnosticsEnabled: parseBoolean(env.ADY_PAGE_DIAGNOSTICS_ENABLED, true),
+    pageDiagnosticsTextLimit: numberFromEnv(env.ADY_PAGE_DIAGNOSTICS_TEXT_LIMIT, 1800),
     artifactsDir: env.ADY_ARTIFACTS_DIR || 'artifacts',
     ...overrides,
   };
@@ -210,6 +218,7 @@ export function normalizeRequest(input: AdyRequestInput | AdyRequest): AdyReques
   const targetDates = normalizeTargetDates(input);
   const adults = Number(input.adults);
   const maxPrice = Number(input.maxPrice);
+  const ticketTypes = normalizeTicketTypes(input.ticketTypes);
 
   if (!from.exact || !to.exact) {
     throw new Error('Haradan və haraya stansiyaları yazılmalıdır.');
@@ -233,7 +242,13 @@ export function normalizeRequest(input: AdyRequestInput | AdyRequest): AdyReques
     targetDates,
     adults,
     maxPrice,
+    ticketTypes,
   };
+}
+
+function normalizeTicketTypes(value: string | string[] | undefined): string[] {
+  const values = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 }
 
 function normalizeTargetDates(input: AdyRequestInput | AdyRequest): TargetDate[] {
@@ -444,47 +459,56 @@ async function runCheck(
   const log = runtimeConfig.log ?? defaultLog;
   log(`Yoxlama başlayır: ${request.from.exact} -> ${request.to.exact}, ${target.displayValue}, ${request.adults} b.`);
 
-  await waitForHomeReady(page, runtimeConfig);
-  await closeOpenPopups(page);
+  try {
+    await waitForHomeReady(page, runtimeConfig);
+    await closeOpenPopups(page);
 
-  await selectStation(page, 'form.search__wrapper .form-group--to', request.from.query, request.from.exact);
-  await selectStation(page, 'form.search__wrapper .form-group--from', request.to.query, request.to.exact);
+    await selectStation(page, 'form.search__wrapper .form-group--to', request.from.query, request.from.exact);
+    await selectStation(page, 'form.search__wrapper .form-group--from', request.to.query, request.to.exact);
 
-  const dateResult = await selectTargetDate(page, target);
-  if (!dateResult.ok) {
-    return { ...dateResult, target, message: `${target.displayValue}: ${dateResult.message}` };
-  }
-  log(dateResult.message);
+    const dateResult = await selectTargetDate(page, target);
+    if (!dateResult.ok) {
+      await logPageDiagnostics(page, runtimeConfig, dateResult.status);
+      return { ...dateResult, target, message: `${target.displayValue}: ${dateResult.message}` };
+    }
+    log(dateResult.message);
 
-  await setAdults(page, request.adults);
+    await setAdults(page, request.adults);
 
-  const result = await submitSearch(page, runtimeConfig);
-  if (result === 'sold-out') {
-    return { ok: true, target, status: 'sold-out', message: `${target.displayValue}: "${SOLD_OUT_TEXT}" modalı göründü.` };
-  }
+    const result = await submitSearch(page, runtimeConfig);
+    if (result === 'sold-out') {
+      return { ok: true, target, status: 'sold-out', message: `${target.displayValue}: "${SOLD_OUT_TEXT}" modalı göründü.` };
+    }
 
-  if (result === 'unknown') {
-    const screenshotPath = await saveScreenshot(page, 'unknown', runtimeConfig);
+    if (result === 'unknown') {
+      await logPageDiagnostics(page, runtimeConfig, 'search-outcome-unknown');
+      const screenshotPath = await saveScreenshot(page, 'unknown', runtimeConfig);
+      return {
+        ok: false,
+        target,
+        status: 'unknown',
+        message: `${target.displayValue}: Nəticə ${Math.round(runtimeConfig.resultWaitMs / 1000)} saniyəyə tam bilinmədi; notification göndərilmir.`,
+        screenshotPath,
+      };
+    }
+
+    const screenshotPath = await saveScreenshot(page, 'available', runtimeConfig);
+    const priceText = result.cheapestPrice > 0 ? ` Ən ucuz qiymət ${formatPrice(result.cheapestPrice)} AZN.` : '';
     return {
-      ok: false,
+      ok: true,
       target,
-      status: 'unknown',
-      message: `${target.displayValue}: Nəticə ${Math.round(runtimeConfig.resultWaitMs / 1000)} saniyəyə tam bilinmədi; notification göndərilmir.`,
+      status: 'tickets-found',
+      cheapestPrice: result.cheapestPrice,
+      prices: result.prices,
+      ticketTypes: result.ticketTypes,
+      ticketSearchUrl: result.ticketSearchUrl,
+      message: `${target.displayValue}: Bilet görünür. Tip: ${formatTicketTypes(result.ticketTypes)}.${priceText}`,
       screenshotPath,
     };
+  } catch (error) {
+    await logPageDiagnostics(page, runtimeConfig, 'check-error');
+    throw error;
   }
-
-  const screenshotPath = await saveScreenshot(page, 'available', runtimeConfig);
-  return {
-    ok: true,
-    target,
-    status: 'tickets-found',
-    cheapestPrice: result.cheapestPrice,
-    prices: result.prices,
-    ticketSearchUrl: result.ticketSearchUrl,
-    message: `${target.displayValue}: Bilet görünür. Ən ucuz qiymət ${formatPrice(result.cheapestPrice)} AZN.`,
-    screenshotPath,
-  };
 }
 
 async function waitForHomeReady(page: Page, runtimeConfig: RuntimeConfig): Promise<void> {
@@ -495,7 +519,7 @@ async function waitForHomeReady(page: Page, runtimeConfig: RuntimeConfig): Promi
     await form.waitFor({ state: 'visible', timeout: 90000 });
   } catch {
     const title = await page.title().catch(() => '');
-    throw new Error(`Axtarış formu açılmadı. Title: "${title}". Cloudflare yoxlaması varsa, görünən browserdə tamamla və yenidən işə sal.`);
+    throw new Error(`Axtarış formu açılmadı. Title: "${title}".`);
   }
 }
 
@@ -827,6 +851,15 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
           return [...new Set(prices)].sort((a, b) => a - b);
         };
 
+        const extractVisibleTicketTypes = () => {
+          const labels = [...document.querySelectorAll('.ticket__item .ticket__type li label nobr, .ticket__type li label nobr')]
+            .filter(isVisible)
+            .map((element) => elementText(element))
+            .filter(Boolean);
+
+          return [...new Set(labels)];
+        };
+
         const soldOutModal = [...document.querySelectorAll('.popup.open')].find(
           (element) => isVisible(element) && elementText(element).includes(soldOutText),
         );
@@ -838,11 +871,13 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
         const text = document.body.innerText || '';
         if (!loading && text.includes('Qatar seçimi')) {
           const prices = extractVisiblePrices();
-          if (prices.length > 0) {
+          const ticketTypes = extractVisibleTicketTypes();
+          if (prices.length > 0 || ticketTypes.length > 0) {
             return {
               status: 'tickets-found',
-              cheapestPrice: prices[0],
+              cheapestPrice: prices[0] ?? 0,
               prices,
+              ticketTypes,
             };
           }
         }
@@ -892,8 +927,80 @@ async function saveScreenshot(page: Page, prefix: string, runtimeConfig: Runtime
   return filePath;
 }
 
+async function logPageDiagnostics(page: Page, runtimeConfig: RuntimeConfig, reason: string): Promise<void> {
+  if (!runtimeConfig.pageDiagnosticsEnabled) return;
+
+  const log = runtimeConfig.log ?? defaultLog;
+  const label = sanitizeDiagnosticLabel(reason);
+
+  try {
+    const snapshot = await page.evaluate(() => {
+      const bodyText = (document.body?.innerText || document.body?.textContent || '').replace(/\s+/g, ' ').trim();
+      const visible = (selector: string) => {
+        const element = document.querySelector(selector);
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+
+      return {
+        url: window.location.href,
+        title: document.title,
+        readyState: document.readyState,
+        bodyText,
+        hasSearchForm: Boolean(document.querySelector('form.search__wrapper')),
+        searchFormVisible: visible('form.search__wrapper'),
+        hasCloudflareSignals: /cloudflare|just a moment|checking if the site connection is secure|verify you are human/i.test(bodyText),
+      };
+    });
+    const bodyText = truncateForLog(snapshot.bodyText || '[empty]', runtimeConfig.pageDiagnosticsTextLimit);
+
+    log(`[ADY diagnostic:${label}] url=${snapshot.url}`);
+    log(`[ADY diagnostic:${label}] title="${snapshot.title}" readyState=${snapshot.readyState} searchForm=${snapshot.hasSearchForm} visible=${snapshot.searchFormVisible} cloudflareSignals=${snapshot.hasCloudflareSignals}`);
+    log(`[ADY diagnostic:${label}] body="${bodyText}"`);
+  } catch (error) {
+    log(`[ADY diagnostic:${label}] page snapshot oxunmadı: ${getErrorMessage(error)}`);
+  }
+
+  const screenshotPath = await saveDiagnosticScreenshot(page, label, runtimeConfig);
+  if (screenshotPath) {
+    log(`[ADY diagnostic:${label}] screenshot=${screenshotPath}`);
+  }
+}
+
+async function saveDiagnosticScreenshot(page: Page, label: string, runtimeConfig: RuntimeConfig): Promise<string | null> {
+  try {
+    const dir = path.resolve(process.cwd(), runtimeConfig.artifactsDir);
+    await fs.mkdir(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filePath = path.join(dir, `diagnostic-${label}-${stamp}.png`);
+    await page.screenshot({ path: filePath, fullPage: true });
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
+function truncateForLog(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`;
+}
+
+function sanitizeDiagnosticLabel(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'page';
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function formatPrice(value: number): string {
   return Number(value).toFixed(2);
+}
+
+function formatTicketTypes(ticketTypes: string[]): string {
+  return ticketTypes.length > 0 ? ticketTypes.join(', ') : 'bilinmir';
 }
 
 export async function delay(ms: number): Promise<void> {

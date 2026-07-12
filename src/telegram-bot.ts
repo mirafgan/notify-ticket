@@ -13,7 +13,7 @@ import {
   stationDisplay,
   type AdyStation,
 } from './modules/ady/stations';
-import { formatPrice, type AdyRequest, type CheckBatch, type TicketsFoundResult } from './modules/ady/scraper';
+import type { AdyRequest, CheckBatch, TicketsFoundResult } from './modules/ady/scraper';
 import {
   buildCalendarKeyboard,
   currentMonthCursor,
@@ -22,26 +22,44 @@ import {
   toIsoDate,
   type CalendarCursor,
 } from './bot/calendar';
-import { AdyJobManager, type AvailableEvent, type CheckedEvent, type JobErrorEvent } from './bot/job-manager';
+import {
+  AdyJobManager,
+  type AdySubscriber,
+  type AvailableEvent,
+  type CheckFailedEvent,
+  type CheckedEvent,
+  type JobErrorEvent,
+} from './bot/job-manager';
 
 dotenv.config({ quiet: true });
 
 type StationField = 'from' | 'to';
 type ChatId = number | string;
+type TicketTypeId = 'comfort' | 'comfort-plus' | 'luxury' | 'standard-plus';
+type TicketTypeOption = {
+  id: TicketTypeId;
+  label: string;
+  aliases: string[];
+};
 
 interface BotSession {
   service: 'ady';
-  step: 'service' | StationField | 'dates' | 'adults' | 'maxPrice' | 'confirm';
+  step: 'service' | StationField | 'dates' | 'adults' | 'ticketTypes' | 'confirm';
   fromStationId: string | null;
   toStationId: string | null;
   selectedDates: Set<string>;
   calendarCursor: CalendarCursor;
   adults: number | null;
-  maxPrice: number | null;
+  selectedTicketTypeIds: Set<TicketTypeId>;
 }
 
 interface ReplyMarkupOptions {
   reply_markup?: InlineKeyboardMarkup;
+}
+
+interface TelegramCommand {
+  command: string;
+  description: string;
 }
 
 const token = process.env.TELEGRAM_BOT_TOKEN || process.env.ADY_TELEGRAM_BOT_TOKEN;
@@ -55,6 +73,18 @@ const maxPassengers = positiveInteger(process.env.ADY_BOT_MAX_PASSENGERS, 10);
 const stationsPerPage = positiveInteger(process.env.ADY_BOT_STATIONS_PER_PAGE, 8);
 const ADY_FROM_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
 const ADY_TO_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
+const TICKET_TYPE_OPTIONS: TicketTypeOption[] = [
+  { id: 'comfort', label: 'Komfort', aliases: ['Komfort'] },
+  { id: 'comfort-plus', label: 'Komfort+', aliases: ['Komfort+'] },
+  { id: 'luxury', label: 'Lüks', aliases: ['Lüks'] },
+  { id: 'standard-plus', label: 'Standart+', aliases: ['Standart+'] },
+];
+const BOT_COMMANDS: TelegramCommand[] = [
+  { command: 'start', description: 'Bot menyusunu aç' },
+  { command: 'ady', description: 'ADY bilet axtarışına başla' },
+  { command: 'status', description: 'Aktiv monitorinqləri göstər' },
+  { command: 'stop', description: 'Monitorinqi dayandır' },
+];
 
 const sessions = new Map<string, BotSession>();
 const bot = new TelegramBot(token, { polling: true });
@@ -99,7 +129,8 @@ bot.onText(/^\/status\b/, async (message: Message) => {
     return [
       `${index + 1}. ${job.request.from.label} -> ${job.request.to.label}`,
       `Tək gediş tarixləri: ${job.request.targetDates.map((target) => target.iso).join(', ')}`,
-      `Sərnişin: ${job.request.adults}, limit: ${formatPrice(subscriber.maxPrice)} AZN`,
+      `Sərnişin: ${job.request.adults}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+      `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
       `Son yoxlama: ${lastRun}`,
     ].join('\n');
   });
@@ -144,16 +175,29 @@ jobManager.on('available', async (event: AvailableEvent) => {
 });
 
 jobManager.on('checked', async (event: CheckedEvent) => {
-  const subscribers = [...event.job.subscribers.values()];
+  const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
 
-  await Promise.all(subscribers.map(async (subscriber) => {
-    if (hasMatchingTicket(event.batch, subscriber.maxPrice)) return;
+  await Promise.all(event.subscribers.map(async (subscriber) => {
+    if (hasMatchingTicket(event.batch, subscriber.ticketTypes)) return;
 
     await bot.sendMessage(
       subscriber.chatId,
-      buildNoTicketsMessage(event.job.request, event.batch, subscriber.maxPrice, event.nextCheckInMs),
+      buildNoTicketsMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
     ).catch((error: Error) => {
       console.error(`Telegram status mesajı göndərilmədi (${subscriber.chatId}): ${error.message}`);
+    });
+  }));
+});
+
+jobManager.on('check-failed', async (event: CheckFailedEvent) => {
+  const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
+
+  await Promise.all(event.subscribers.map(async (subscriber) => {
+    await bot.sendMessage(
+      subscriber.chatId,
+      buildCheckFailedMessage(event.job.request, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
+    ).catch((error: Error) => {
+      console.error(`Telegram xeta status mesaji gonderilmedi (${subscriber.chatId}): ${error.message}`);
     });
   }));
 });
@@ -166,7 +210,29 @@ jobManager.on('job-error', ({ job, error }: JobErrorEvent) => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+registerBotCommands().catch((error: unknown) => {
+  console.error(`Telegram command menyusu yenilənmədi: ${formatErrorMessage(error)}`);
+});
 console.log('Telegram bot işə düşdü.');
+
+async function registerBotCommands(): Promise<void> {
+  const response = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ commands: BOT_COMMANDS }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Telegram API ${response.status}: ${await response.text()}`);
+  }
+
+  const payload = await response.json() as { ok?: boolean; description?: string };
+  if (!payload.ok) {
+    throw new Error(payload.description || 'setMyCommands failed');
+  }
+
+  console.log('Telegram command menyusu yeniləndi.');
+}
 
 async function handleCallback(query: CallbackQuery, data: string): Promise<void> {
   const chatId = query.message?.chat.id;
@@ -256,9 +322,41 @@ async function handleCallback(query: CallbackQuery, data: string): Promise<void>
     const adults = Number(data.replace('p:', ''));
     const session = ensureSession(chatId);
     session.adults = adults;
-    session.step = 'maxPrice';
+    session.step = 'ticketTypes';
     await answerCallback(query.id);
-    await askMaxPrice(chatId);
+    await showTicketTypeSelector(chatId);
+    return;
+  }
+
+  if (data.startsWith('tt:toggle:')) {
+    const session = ensureSession(chatId);
+    const ticketTypeId = parseTicketTypeId(data.replace('tt:toggle:', ''));
+    if (!ticketTypeId) {
+      await answerCallback(query.id, 'Yanlış seçim.');
+      return;
+    }
+
+    if (session.selectedTicketTypeIds.has(ticketTypeId)) {
+      session.selectedTicketTypeIds.delete(ticketTypeId);
+    } else {
+      session.selectedTicketTypeIds.add(ticketTypeId);
+    }
+
+    await answerCallback(query.id);
+    await showTicketTypeSelector(chatId, messageId);
+    return;
+  }
+
+  if (data === 'tt:done') {
+    const session = ensureSession(chatId);
+    if (session.selectedTicketTypeIds.size === 0) {
+      await answerCallback(query.id, 'Ən azı bir zal tipi seç.');
+      return;
+    }
+
+    session.step = 'confirm';
+    await answerCallback(query.id);
+    await showConfirm(chatId, session);
     return;
   }
 
@@ -308,19 +406,20 @@ async function handleTextMessage(message: Message): Promise<void> {
     }
 
     session.adults = adults;
-    session.step = 'maxPrice';
-    await askMaxPrice(chatId);
+    session.step = 'ticketTypes';
+    await showTicketTypeSelector(chatId);
     return;
   }
 
-  if (session.step === 'maxPrice') {
-    const maxPrice = parsePrice(text);
-    if (!Number.isFinite(maxPrice) || maxPrice <= 0) {
-      await bot.sendMessage(chatId, 'Maksimum qiyməti rəqəm kimi yaz. Məsələn: 87.72');
+  if (session.step === 'ticketTypes') {
+    const ticketTypeIds = parseTicketTypeText(text);
+    if (ticketTypeIds.length === 0) {
+      await bot.sendMessage(chatId, 'Zal tipini seç: Komfort, Komfort+, Lüks və ya Standart+.');
+      await showTicketTypeSelector(chatId);
       return;
     }
 
-    session.maxPrice = maxPrice;
+    session.selectedTicketTypeIds = new Set(ticketTypeIds);
     session.step = 'confirm';
     await showConfirm(chatId, session);
     return;
@@ -442,8 +541,25 @@ async function askAdults(chatId: ChatId): Promise<void> {
   });
 }
 
-async function askMaxPrice(chatId: ChatId): Promise<void> {
-  await bot.sendMessage(chatId, 'Maksimum qiyməti AZN ilə yaz. Bu qiymətdən yuxarı olsa xəbərdarlıq göndərməyəcəyəm.\nMəsələn: 87.72');
+async function showTicketTypeSelector(chatId: ChatId, editMessageId?: number): Promise<void> {
+  const session = ensureSession(chatId);
+  session.step = 'ticketTypes';
+
+  const buttons = TICKET_TYPE_OPTIONS.map((ticketType) => [{
+    text: `${session.selectedTicketTypeIds.has(ticketType.id) ? '✓ ' : ''}${ticketType.label}`,
+    callback_data: `tt:toggle:${ticketType.id}`,
+  }]);
+
+  buttons.push([{ text: 'Hazır', callback_data: 'tt:done' }]);
+
+  const selected = formatSelectedTicketTypes(session.selectedTicketTypeIds) || 'yoxdur';
+  await sendOrEdit(chatId, editMessageId, [
+    'Hansı zal tipini axtaraq?',
+    'Bir və ya bir neçə seçim edə bilərsən.',
+    `Seçilənlər: ${selected}`,
+  ].join('\n'), {
+    reply_markup: { inline_keyboard: buttons },
+  });
 }
 
 async function showConfirm(chatId: ChatId, session: BotSession): Promise<void> {
@@ -453,7 +569,7 @@ async function showConfirm(chatId: ChatId, session: BotSession): Promise<void> {
     `${request.from.label} -> ${request.to.label}`,
     `Tək gediş tarixləri: ${request.targetDates.join(', ')}`,
     `Sərnişin: ${request.adults}`,
-    `Max qiymət: ${formatPrice(request.maxPrice)} AZN`,
+    `Zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
     '',
     'Monitorinq hər 5 dəqiqədən bir yoxlayacaq.',
   ];
@@ -474,6 +590,7 @@ async function startMonitoring(chatId: ChatId, user: User, session: BotSession):
     chatId,
     userId: user.id,
     username: user.username,
+    ticketTypes: request.ticketTypes,
   });
   sessions.delete(String(chatId));
 
@@ -484,30 +601,122 @@ async function startMonitoring(chatId: ChatId, user: User, session: BotSession):
     status,
     `${request.from.label} -> ${request.to.label}`,
     `Tək gediş tarixləri: ${request.targetDates.join(', ')}`,
-    `Sərnişin: ${request.adults}, limit: ${formatPrice(request.maxPrice)} AZN`,
+    `Sərnişin: ${request.adults}, zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
+    `Axtarış limiti: ${subscription.job.subscribers.get(String(chatId))?.maxChecks ?? 24} yoxlama`,
     `Aktiv subscriber sayı: ${subscription.subscriberCount}`,
     '',
     'Dayandırmaq üçün /stop yaz.',
   ].join('\n'));
 }
 
-function hasMatchingTicket(batch: CheckBatch, maxPrice: number): boolean {
+function hasMatchingTicket(batch: CheckBatch, selectedTicketTypes: string[]): boolean {
   return batch.results.some((result): result is TicketsFoundResult => (
-    result.status === 'tickets-found' && result.cheapestPrice <= maxPrice
+    result.status === 'tickets-found' && ticketTypesMatch(result.ticketTypes, selectedTicketTypes)
   ));
 }
 
-function buildNoTicketsMessage(request: AdyRequest, batch: CheckBatch, maxPrice: number, nextCheckInMs: number): string {
+function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: string[]): boolean {
+  if (selectedTicketTypes.length === 0) return true;
+  const selected = new Set(selectedTicketTypes.map(normalizeTicketType));
+  return availableTicketTypes.some((ticketType) => selected.has(normalizeTicketType(ticketType)));
+}
+
+function buildNoTicketsMessage(
+  request: AdyRequest,
+  batch: CheckBatch,
+  subscriber: AdySubscriber,
+  nextCheckInMs: number,
+  expired: boolean,
+): string {
   const checkedDates = batch.results.map((result) => result.target.displayValue).join(', ');
+  const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
+  const retryLine = expired
+    ? 'Bu yoxlamanı etdim, uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `Bu yoxlamanı etdim, uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
 
   return [
     'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
     `Tarixlər: ${checkedDates || request.targetDates.map((target) => target.displayValue).join(', ')}`,
-    `${request.adults} nəfər, limit: ${formatPrice(maxPrice)} AZN`,
+    `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
     '',
-    `Uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən cəhd ediləcək.`,
+    retryLine,
   ].join('\n');
+}
+
+function buildCheckFailedMessage(
+  request: AdyRequest,
+  subscriber: AdySubscriber,
+  nextCheckInMs: number,
+  expired: boolean,
+): string {
+  const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
+  const retryLine = expired
+    ? 'Bu yoxlamanı etdim, uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `Bu yoxlamanı etdim, uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
+
+  return [
+    'ADY axtarışı edildi.',
+    `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
+    `Tarixlər: ${request.targetDates.map((target) => target.displayValue).join(', ')}`,
+    `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
+    '',
+    retryLine,
+  ].join('\n');
+}
+
+function formatErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 140 ? `${message.slice(0, 137)}...` : message;
+}
+
+function parseTicketTypeId(value: string): TicketTypeId | null {
+  return TICKET_TYPE_OPTIONS.some((ticketType) => ticketType.id === value) ? value as TicketTypeId : null;
+}
+
+function parseTicketTypeText(value: string): TicketTypeId[] {
+  const normalizedValue = normalizeTicketType(value);
+  const tokens = new Set(normalizedValue.split(/[,\s;/|]+/).filter(Boolean));
+
+  return TICKET_TYPE_OPTIONS
+    .filter((ticketType) => ticketType.aliases.some((alias) => {
+      const normalizedAlias = normalizeTicketType(alias);
+      return normalizedValue === normalizedAlias || tokens.has(normalizedAlias);
+    }))
+    .map((ticketType) => ticketType.id);
+}
+
+function getSelectedTicketTypeLabels(selectedIds: Set<TicketTypeId>): string[] {
+  return TICKET_TYPE_OPTIONS
+    .filter((ticketType) => selectedIds.has(ticketType.id))
+    .map((ticketType) => ticketType.label);
+}
+
+function formatSelectedTicketTypes(selectedIds: Set<TicketTypeId>): string {
+  return formatTicketTypes(getSelectedTicketTypeLabels(selectedIds));
+}
+
+function formatTicketTypes(ticketTypes: string[]): string {
+  return ticketTypes.length > 0 ? ticketTypes.join(', ') : '';
+}
+
+function normalizeTicketType(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[əƏ]/g, 'e')
+    .replace(/[ıİ]/g, 'i')
+    .replace(/[ğĞ]/g, 'g')
+    .replace(/[şŞ]/g, 's')
+    .replace(/[çÇ]/g, 'c')
+    .replace(/[öÖ]/g, 'o')
+    .replace(/[üÜ]/g, 'u')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*\+\s*/g, '+')
+    .trim();
 }
 
 function formatRetryDelay(delayMs: number): string {
@@ -521,7 +730,8 @@ function formatRetryDelay(delayMs: number): string {
 function buildRequest(session: BotSession) {
   const from = getStationById(session.fromStationId ?? '');
   const to = getStationById(session.toStationId ?? '');
-  if (!from || !to || session.adults == null || session.maxPrice == null) {
+  const ticketTypes = getSelectedTicketTypeLabels(session.selectedTicketTypeIds);
+  if (!from || !to || session.adults == null || ticketTypes.length === 0) {
     throw new Error('Sorğu tamamlanmayıb.');
   }
 
@@ -530,7 +740,8 @@ function buildRequest(session: BotSession) {
     to,
     targetDates: [...session.selectedDates].sort(),
     adults: session.adults,
-    maxPrice: session.maxPrice,
+    maxPrice: Number.MAX_SAFE_INTEGER,
+    ticketTypes,
   };
 }
 
@@ -571,7 +782,7 @@ function createSession(): BotSession {
     selectedDates: new Set(),
     calendarCursor: currentMonthCursor(),
     adults: null,
-    maxPrice: null,
+    selectedTicketTypeIds: new Set(),
   };
 }
 
@@ -611,10 +822,6 @@ async function answerCallback(callbackQueryId: string, text?: string): Promise<v
 
 function parseStationField(value: string | undefined): StationField | null {
   return value === 'from' || value === 'to' ? value : null;
-}
-
-function parsePrice(value: string): number {
-  return Number(value.replace(',', '.').replace(/[^\d.]/g, ''));
 }
 
 function parseCsv(value: string): string[] {
