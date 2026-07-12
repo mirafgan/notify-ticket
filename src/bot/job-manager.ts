@@ -29,6 +29,8 @@ export interface AdyJob {
   request: AdyRequest;
   subscribers: Map<string, AdySubscriber>;
   timer: NodeJS.Timeout | null;
+  running: boolean;
+  pendingImmediateRun: boolean;
   stopped: boolean;
   lastRunAt: Date | null;
   createdAt: Date;
@@ -130,12 +132,13 @@ export class AdyJobManager extends EventEmitter {
         request,
         subscribers: new Map(),
         timer: null,
+        running: false,
+        pendingImmediateRun: false,
         stopped: false,
         lastRunAt: null,
         createdAt: new Date(),
       };
       this.jobs.set(key, job);
-      this.schedule(job, 0);
     }
 
     const chatId = String(subscriberInput.chatId);
@@ -148,6 +151,14 @@ export class AdyJobManager extends EventEmitter {
       maxChecks: this.maxChecksPerSubscription,
       createdAt: new Date(),
     });
+
+    if (created) {
+      this.schedule(job, 0);
+    } else if (job.running) {
+      job.pendingImmediateRun = true;
+    } else {
+      this.schedule(job, 0);
+    }
 
     return {
       created,
@@ -233,13 +244,22 @@ export class AdyJobManager extends EventEmitter {
       return;
     }
 
-    await this.runWithLimit(async () => {
-      if (job.stopped || job.subscribers.size === 0) return null;
-      return this.checkJob(job);
-    });
+    const runSubscriberIds = new Set(job.subscribers.keys());
+    job.running = true;
+
+    try {
+      await this.runWithLimit(async () => {
+        if (job.stopped || job.subscribers.size === 0) return null;
+        return this.checkJob(job, runSubscriberIds);
+      });
+    } finally {
+      job.running = false;
+    }
 
     if (!job.stopped && job.subscribers.size > 0) {
-      this.schedule(job, this.runtimeConfig.intervalMs);
+      const delayMs = job.pendingImmediateRun ? 0 : this.runtimeConfig.intervalMs;
+      job.pendingImmediateRun = false;
+      this.schedule(job, delayMs);
     }
   }
 
@@ -270,7 +290,7 @@ export class AdyJobManager extends EventEmitter {
     }
   }
 
-  private async checkJob(job: AdyJob): Promise<void> {
+  private async checkJob(job: AdyJob, runSubscriberIds: Set<string>): Promise<void> {
     let page: Page | null = null;
 
     try {
@@ -282,24 +302,24 @@ export class AdyJobManager extends EventEmitter {
         ...this.runtimeConfig,
         log: (message) => this.log(`[ADY] ${message}`),
       });
-      this.handleBatch(job, batch);
-      const expiredSubscribers = this.markCheckCompleted(job);
+      this.handleBatch(job, batch, runSubscriberIds);
+      const expiredSubscribers = this.markCheckCompleted(job, runSubscriberIds);
       this.emit('checked', {
         job,
         batch,
         nextCheckInMs: this.runtimeConfig.intervalMs,
-        subscribers: [...job.subscribers.values()],
+        subscribers: this.getRunSubscribers(job, runSubscriberIds),
         expiredSubscribers,
       } satisfies CheckedEvent);
       this.removeExpiredSubscribers(job, expiredSubscribers);
     } catch (error) {
-      const expiredSubscribers = this.markCheckCompleted(job);
+      const expiredSubscribers = this.markCheckCompleted(job, runSubscriberIds);
       this.emit('job-error', { job, error } satisfies JobErrorEvent);
       this.emit('check-failed', {
         job,
         error,
         nextCheckInMs: this.runtimeConfig.intervalMs,
-        subscribers: [...job.subscribers.values()],
+        subscribers: this.getRunSubscribers(job, runSubscriberIds),
         expiredSubscribers,
       } satisfies CheckFailedEvent);
       this.removeExpiredSubscribers(job, expiredSubscribers);
@@ -328,8 +348,10 @@ export class AdyJobManager extends EventEmitter {
     return this.contextPromise;
   }
 
-  private handleBatch(job: AdyJob, batch: CheckBatch): void {
+  private handleBatch(job: AdyJob, batch: CheckBatch, runSubscriberIds: Set<string>): void {
     for (const subscriber of [...job.subscribers.values()]) {
+      if (!runSubscriberIds.has(subscriber.chatId)) continue;
+
       const matches = batch.results
         .filter((result): result is TicketsFoundResult => result.status === 'tickets-found' && ticketTypesMatch(result.ticketTypes, subscriber.ticketTypes))
         .sort((left, right) => left.cheapestPrice - right.cheapestPrice);
@@ -353,10 +375,12 @@ export class AdyJobManager extends EventEmitter {
     }
   }
 
-  private markCheckCompleted(job: AdyJob): AdySubscriber[] {
+  private markCheckCompleted(job: AdyJob, runSubscriberIds: Set<string>): AdySubscriber[] {
     const expiredSubscribers: AdySubscriber[] = [];
 
     for (const subscriber of job.subscribers.values()) {
+      if (!runSubscriberIds.has(subscriber.chatId)) continue;
+
       subscriber.checksCompleted += 1;
       if (subscriber.checksCompleted >= subscriber.maxChecks) {
         expiredSubscribers.push(subscriber);
@@ -364,6 +388,10 @@ export class AdyJobManager extends EventEmitter {
     }
 
     return expiredSubscribers;
+  }
+
+  private getRunSubscribers(job: AdyJob, runSubscriberIds: Set<string>): AdySubscriber[] {
+    return [...job.subscribers.values()].filter((subscriber) => runSubscriberIds.has(subscriber.chatId));
   }
 
   private removeExpiredSubscribers(job: AdyJob, expiredSubscribers: AdySubscriber[]): void {
@@ -405,8 +433,8 @@ function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: s
 }
 
 function matchingTicketTypes(availableTicketTypes: string[], selectedTicketTypes: string[]): string[] {
-  const selected = new Set(selectedTicketTypes.map(canonicalTicketType));
-  return availableTicketTypes.filter((ticketType) => selected.has(canonicalTicketType(ticketType)));
+  const selected = new Set(selectedTicketTypes.map(normalizeTicketType));
+  return availableTicketTypes.filter((ticketType) => selected.has(normalizeTicketType(ticketType)));
 }
 
 function normalizeTicketType(value: string): string {
@@ -424,12 +452,6 @@ function normalizeTicketType(value: string): string {
     .replace(/\s+/g, ' ')
     .replace(/\s*\+\s*/g, '+')
     .trim();
-}
-
-function canonicalTicketType(value: string): string {
-  const normalized = normalizeTicketType(value);
-  if (normalized === 'komfort') return 'komfort+';
-  return normalized;
 }
 
 function parseBoolean(value: unknown, fallback: boolean): boolean {
