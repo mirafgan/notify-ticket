@@ -22,6 +22,25 @@ export const ADY_TICKET_STATION_IDS = {
   qardabani: 172,
 } as const satisfies Record<string, number>;
 
+// Verified against ticket.ady.az on 2026-07-26. Every station in this set can
+// be paired with every other station in the set; only an identical origin and
+// destination is excluded.
+export const ADY_SUPPORTED_TICKET_STATION_IDS = [
+  'baki-dyv',
+  'bileceri',
+  'yevlax',
+  'gence',
+  'agstafa',
+  'boyuk-kesik',
+  'tbilisi-sern',
+  'qardabani',
+] as const satisfies readonly (keyof typeof ADY_TICKET_STATION_IDS)[];
+
+export function getTicketDestinationStationIds(fromStationId: string): string[] {
+  if (!ADY_SUPPORTED_TICKET_STATION_IDS.some((stationId) => stationId === fromStationId)) return [];
+  return ADY_SUPPORTED_TICKET_STATION_IDS.filter((stationId) => stationId !== fromStationId);
+}
+
 export const ADY_STATIONS = [
   { id: 'baki-dyv', label: 'Bakı', exact: 'BAKI DYV', query: 'BAKI', country: 'AZƏRBAYCAN' },
   { id: 'tbilisi-sern', label: 'Tbilisi-Sərn', exact: 'TBİLİSİ-SƏRN', query: 'TBİLİSİ', country: 'GÜRCÜSTAN' },

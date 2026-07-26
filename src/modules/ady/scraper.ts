@@ -709,36 +709,19 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
         const elementText = (element: Element) => ((element as HTMLElement).innerText || element.textContent || '').replace(/\s+/g, ' ').trim();
 
         const extractVisiblePrices = () => {
-          const prices: number[] = [];
-          const elements = [...document.querySelectorAll('body *')].filter(isVisible);
+          return [...document.querySelectorAll('a.ticket__price > span')]
+            .filter(isVisible)
+            .map((element) => elementText(element))
+            .map((text) => {
+              const match = text.match(/(\d{1,3}(?:[\s\u00a0]\d{3})*[.,]\d{2})/);
+              if (!match) return null;
 
-          for (const element of elements) {
-            const text = elementText(element);
-            if (!text) continue;
-
-            const className = String(element.className || '');
-            const hasManatSvg = [...element.querySelectorAll('use')].some((use) => {
-              const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
-              return href.toLowerCase().includes('manat');
-            });
-            const looksLikePrice =
-              hasManatSvg ||
-              /₼|azn|manat/i.test(text) ||
-              /price|fare|amount|cost|qiym/i.test(className);
-
-            if (!looksLikePrice) continue;
-
-            const regex = /(^|[^\d])(\d{1,4}[.,]\d{2})(?!\d)/g;
-            let match: RegExpExecArray | null;
-            while ((match = regex.exec(text))) {
-              const value = Number(match[2].replace(',', '.'));
-              if (Number.isFinite(value) && value > 0 && value < 1000) {
-                prices.push(value);
-              }
-            }
-          }
-
-          return [...new Set(prices)].sort((a, b) => a - b);
+              const value = Number(match[1].replace(/[\s\u00a0]/g, '').replace(',', '.'));
+              return Number.isFinite(value) && value > 0 ? value : null;
+            })
+            .filter((value): value is number => value != null)
+            .filter((value, index, prices) => prices.indexOf(value) === index)
+            .sort((a, b) => a - b);
         };
 
         const extractVisibleTicketTypes = () => {
@@ -764,6 +747,8 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
         if (ticketItems.length === 0) return 'sold-out';
 
         const prices = extractVisiblePrices();
+        if (prices.length === 0) return false;
+
         const ticketTypes = extractVisibleTicketTypes();
         return {
           status: 'tickets-found',
@@ -863,6 +848,14 @@ function getErrorMessage(error: unknown): string {
 
 export function formatPrice(value: number): string {
   return Number(value).toFixed(2);
+}
+
+export function parseTicketPrice(value: string): number | null {
+  const match = value.match(/(\d{1,3}(?:[\s\u00a0]\d{3})*[.,]\d{2})/);
+  if (!match) return null;
+
+  const parsed = Number(match[1].replace(/[\s\u00a0]/g, '').replace(',', '.'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 export function formatPassengers(passengers: Pick<AdyRequest, 'adults' | 'infant' | 'child'>): string {

@@ -8,6 +8,8 @@ import TelegramBot, {
 } from 'node-telegram-bot-api';
 import {
   ADY_STATIONS,
+  ADY_SUPPORTED_TICKET_STATION_IDS,
+  getTicketDestinationStationIds,
   getStationById,
   matchStationText,
   stationDisplay,
@@ -80,10 +82,6 @@ if (!token) {
 const allowedChatIds = parseCsv(process.env.TELEGRAM_ALLOWED_CHAT_IDS || process.env.ADY_TELEGRAM_ALLOWED_CHAT_IDS || '');
 const maxSelectedDates = Math.min(positiveInteger(process.env.ADY_BOT_MAX_DATES, 4), 4);
 const stationsPerPage = positiveInteger(process.env.ADY_BOT_STATIONS_PER_PAGE, 8);
-const ADY_AZERBAIJAN_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
-const ADY_GEORGIA_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
-const ADY_FROM_STATION_IDS = [...ADY_AZERBAIJAN_STATION_IDS, ...ADY_GEORGIA_STATION_IDS] as const;
-const ADY_REVERSE_TO_STATION_IDS = ['baki-dyv'] as const;
 const TICKET_TYPE_OPTIONS: TicketTypeOption[] = [
   { id: 'comfort', label: 'Komfort', aliases: ['Komfort'] },
   { id: 'comfort-plus', label: 'Komfort+', aliases: ['Komfort+'] },
@@ -810,12 +808,8 @@ function getStationsForField(field: StationField, session?: Pick<BotSession, 'fr
 }
 
 function getAllowedStationIds(field: StationField, fromStationId: string | null = null): readonly string[] {
-  if (field === 'from') return ADY_FROM_STATION_IDS;
-  if (fromStationId && ADY_GEORGIA_STATION_IDS.includes(fromStationId as typeof ADY_GEORGIA_STATION_IDS[number])) {
-    return ADY_REVERSE_TO_STATION_IDS;
-  }
-
-  return ADY_GEORGIA_STATION_IDS;
+  if (field === 'from') return ADY_SUPPORTED_TICKET_STATION_IDS;
+  return fromStationId ? getTicketDestinationStationIds(fromStationId) : [];
 }
 
 function isStationAllowedForField(field: StationField, station: AdyStation, session?: Pick<BotSession, 'fromStationId'>): boolean {
@@ -833,11 +827,10 @@ function stationHelpText(field: StationField, session?: Pick<BotSession, 'fromSt
     return 'Başlanğıc Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik, Tbilisi-Sərn və ya Qardabani ola bilər.';
   }
 
-  if (session?.fromStationId && ADY_GEORGIA_STATION_IDS.includes(session.fromStationId as typeof ADY_GEORGIA_STATION_IDS[number])) {
-    return 'Tbilisi-Sərn və ya Qardabanidən gediş üçün son məntəqə Bakı ola bilər.';
-  }
+  if (!session?.fromStationId) return 'Əvvəl başlanğıc stansiyanı seçin.';
 
-  return 'Bu istiqamət üçün son məntəqə yalnız Tbilisi-Sərn və ya Qardabani ola bilər.';
+  const destinations = getStationsForField('to', session).map((station) => station.label).join(', ');
+  return `Seçilmiş başlanğıc stansiyası üçün son məntəqə: ${destinations}.`;
 }
 
 function createSession(): BotSession {

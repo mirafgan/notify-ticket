@@ -5,10 +5,11 @@ import {
   classifyTicketApiResult,
   createScrapeKey,
   normalizeRequest,
+  parseTicketPrice,
   parseTargetDate,
   summarizeBatchForMaxPrice,
 } from './scraper';
-import { getTicketStationId } from './stations';
+import { getTicketDestinationStationIds, getTicketStationId } from './stations';
 
 const baseRequest = {
   from: { id: 'baki-dyv' },
@@ -59,6 +60,18 @@ test('maps every Telegram station to its ADY ticket-search ID', () => {
       qardabani: 172,
     },
   );
+});
+
+test('allows every other supported ADY station as Tbilisi-Sərn destination', () => {
+  assert.deepEqual(getTicketDestinationStationIds('tbilisi-sern'), [
+    'baki-dyv',
+    'bileceri',
+    'yevlax',
+    'gence',
+    'agstafa',
+    'boyuk-kesik',
+    'qardabani',
+  ]);
 });
 
 test('builds a direct Tbilisi to Baku ticket-search URL', () => {
@@ -124,4 +137,10 @@ test('distinguishes an empty ADY result from a ReCaptcha failure', () => {
     classifyTicketApiResult(422, { error: true, message: 'ReCaptcha validation failed' }),
     { status: 'unknown', message: 'ADY bilet API xətası (422): ReCaptcha validation failed.' },
   );
+});
+
+test('parses the displayed ticket price text', () => {
+  assert.equal(parseTicketPrice('  213.46 AZN  '), 213.46);
+  assert.equal(parseTicketPrice('1 213,46 AZN'), 1213.46);
+  assert.equal(parseTicketPrice('Qiymət göstərilməyib'), null);
 });
