@@ -96,7 +96,7 @@ async function main(): Promise<void> {
         const batch = await runChecks(page, request, { ...runtimeConfig, log });
         const result = summarizeBatchForMaxPrice(batch, request, runtimeConfig);
 
-        if (result.status === 'no-match' || result.status === 'price-too-high') {
+        if (result.status === 'no-match' || result.status === 'price-too-high' || result.status === 'unknown') {
           log(result.message);
         }
 

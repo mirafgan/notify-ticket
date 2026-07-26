@@ -80,8 +80,10 @@ if (!token) {
 const allowedChatIds = parseCsv(process.env.TELEGRAM_ALLOWED_CHAT_IDS || process.env.ADY_TELEGRAM_ALLOWED_CHAT_IDS || '');
 const maxSelectedDates = Math.min(positiveInteger(process.env.ADY_BOT_MAX_DATES, 4), 4);
 const stationsPerPage = positiveInteger(process.env.ADY_BOT_STATIONS_PER_PAGE, 8);
-const ADY_FROM_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
-const ADY_TO_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
+const ADY_AZERBAIJAN_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
+const ADY_GEORGIA_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
+const ADY_FROM_STATION_IDS = [...ADY_AZERBAIJAN_STATION_IDS, ...ADY_GEORGIA_STATION_IDS] as const;
+const ADY_REVERSE_TO_STATION_IDS = ['baki-dyv'] as const;
 const TICKET_TYPE_OPTIONS: TicketTypeOption[] = [
   { id: 'comfort', label: 'Komfort', aliases: ['Komfort'] },
   { id: 'comfort-plus', label: 'Komfort+', aliases: ['Komfort+'] },
@@ -188,10 +190,13 @@ jobManager.on('checked', async (event: CheckedEvent) => {
 
   await Promise.all(event.subscribers.map(async (subscriber) => {
     if (hasMatchingTicket(event.batch, subscriber.ticketTypes)) return;
+    const message = hasUnknownResult(event.batch)
+      ? buildIndeterminateResultMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId))
+      : buildNoTicketsMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId));
 
     await bot.sendMessage(
       subscriber.chatId,
-      buildNoTicketsMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
+      message,
     ).catch((error: Error) => {
       console.error(`Telegram status mesajı göndərilmədi (${subscriber.chatId}): ${error.message}`);
     });
@@ -272,12 +277,12 @@ async function handleCallback(query: CallbackQuery, data: string): Promise<void>
     const [, fieldText, stationId] = data.split(':');
     const field = parseStationField(fieldText);
     const station = stationId ? getStationById(stationId) : null;
-    if (!field || !station || !isStationAllowedForField(field, station)) {
+    const session = ensureSession(chatId);
+    if (!field || !station || !isStationAllowedForField(field, station, session)) {
       await answerCallback(query.id, 'Bu istiqamət mövcud deyil.');
       return;
     }
 
-    const session = ensureSession(chatId);
     const accepted = await setStationSelection(chatId, session, field, station, query.id);
     if (!accepted) return;
 
@@ -403,9 +408,9 @@ async function handleTextMessage(message: Message): Promise<void> {
 
   if (session.step === 'from' || session.step === 'to') {
     const field = session.step;
-    const station = matchStationForField(field, text);
+    const station = matchStationForField(field, text, session);
     if (!station) {
-      await bot.sendMessage(chatId, stationHelpText(field));
+      await bot.sendMessage(chatId, stationHelpText(field, session));
       return;
     }
 
@@ -449,6 +454,15 @@ async function setStationSelection(
   station: AdyStation,
   callbackQueryId?: string,
 ): Promise<boolean> {
+  if (!isStationAllowedForField(field, station, session)) {
+    if (callbackQueryId) {
+      await answerCallback(callbackQueryId, 'Bu istiqamət mövcud deyil.');
+    } else {
+      await bot.sendMessage(chatId, stationHelpText(field, session));
+    }
+    return false;
+  }
+
   if (field === 'to' && station.id === session.fromStationId) {
     if (callbackQueryId) {
       await answerCallback(callbackQueryId, 'Haradan və haraya eyni ola bilməz.');
@@ -488,7 +502,7 @@ async function showStationSelector(
   const session = ensureSession(chatId);
   session.step = field;
   const excludedId = field === 'to' ? session.fromStationId : null;
-  const stations = getStationsForField(field).filter((station) => station.id !== excludedId);
+  const stations = getStationsForField(field, session).filter((station) => station.id !== excludedId);
   const pageCount = Math.max(1, Math.ceil(stations.length / stationsPerPage));
   const safePage = Math.min(Math.max(page, 0), pageCount - 1);
   const start = safePage * stationsPerPage;
@@ -508,12 +522,12 @@ async function showStationSelector(
   const text = field === 'from'
     ? [
       'Haradan gedirsən?',
-      'Mövcud istiqamət yalnız Azərbaycandan Tbilisi və ya Qardabani tərəfədir.',
-      'Seçimlər: Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik.',
+      'Azərbaycan və Gürcüstan arasında gediş istiqamətini seç.',
+      'Seçimlər: Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik, Tbilisi-Sərn, Qardabani.',
     ].join('\n')
     : [
       'Haraya gedirsən?',
-      'Son məntəqə yalnız Tbilisi-Sərn və ya Qardabani seçilə bilər.',
+      stationHelpText(field, session),
     ].join('\n');
 
   await sendOrEdit(chatId, editMessageId, text, {
@@ -630,6 +644,10 @@ function hasMatchingTicket(batch: CheckBatch, selectedTicketTypes: string[]): bo
   ));
 }
 
+function hasUnknownResult(batch: CheckBatch): boolean {
+  return batch.results.some((result) => result.status === 'unknown');
+}
+
 function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: string[]): boolean {
   if (selectedTicketTypes.length === 0) return true;
   const selected = new Set(selectedTicketTypes.map(normalizeTicketType));
@@ -660,6 +678,30 @@ function buildNoTicketsMessage(
   ].join('\n');
 }
 
+function buildIndeterminateResultMessage(
+  request: AdyRequest,
+  batch: CheckBatch,
+  subscriber: AdySubscriber,
+  nextCheckInMs: number,
+  expired: boolean,
+): string {
+  const unknownResults = batch.results.filter((result) => result.status === 'unknown');
+  const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
+  const retryLine = expired
+    ? 'Axtarış limiti bitdiyi üçün nəticə yenidən yoxlanmayacaq.'
+    : `${formatRetryDelay(nextCheckInMs)} sonra nəticə yenidən yoxlanacaq. Qalan yoxlama sayı: ${remainingChecks}.`;
+
+  return [
+    'ADY axtarışının nəticəsi tam müəyyən olmadı.',
+    `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
+    `Tarixlər: ${unknownResults.map((result) => result.target.displayValue).join(', ')}`,
+    `${formatPassengers(request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `Səbəb: ${unknownResults.map((result) => result.message).join(' ')}`,
+    '',
+    retryLine,
+  ].join('\n');
+}
+
 function buildCheckFailedMessage(
   request: AdyRequest,
   subscriber: AdySubscriber,
@@ -668,8 +710,8 @@ function buildCheckFailedMessage(
 ): string {
   const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
   const retryLine = expired
-    ? 'Bu yoxlamanı etdim, uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
-    : `Bu yoxlamanı etdim, uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
+    ? 'ADY yoxlaması xətayla tamamlanmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `ADY yoxlaması xətayla tamamlanmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlanacaq. Qalan yoxlama sayı: ${remainingChecks}.`;
 
   return [
     'ADY axtarışı edildi.',
@@ -762,29 +804,37 @@ function buildRequest(session: BotSession) {
   };
 }
 
-function getStationsForField(field: StationField): AdyStation[] {
-  const allowedIds = getAllowedStationIds(field);
+function getStationsForField(field: StationField, session?: Pick<BotSession, 'fromStationId'>): AdyStation[] {
+  const allowedIds = getAllowedStationIds(field, session?.fromStationId ?? null);
   return ADY_STATIONS.filter((station) => allowedIds.includes(station.id));
 }
 
-function getAllowedStationIds(field: StationField): readonly string[] {
+function getAllowedStationIds(field: StationField, fromStationId: string | null = null): readonly string[] {
   if (field === 'from') return ADY_FROM_STATION_IDS;
-  return ADY_TO_STATION_IDS;
+  if (fromStationId && ADY_GEORGIA_STATION_IDS.includes(fromStationId as typeof ADY_GEORGIA_STATION_IDS[number])) {
+    return ADY_REVERSE_TO_STATION_IDS;
+  }
+
+  return ADY_GEORGIA_STATION_IDS;
 }
 
-function isStationAllowedForField(field: StationField, station: AdyStation): boolean {
-  return getStationsForField(field).some((allowedStation) => allowedStation.id === station.id);
+function isStationAllowedForField(field: StationField, station: AdyStation, session?: Pick<BotSession, 'fromStationId'>): boolean {
+  return getStationsForField(field, session).some((allowedStation) => allowedStation.id === station.id);
 }
 
-function matchStationForField(field: StationField, text: string): AdyStation | null {
+function matchStationForField(field: StationField, text: string, session?: Pick<BotSession, 'fromStationId'>): AdyStation | null {
   const station = matchStationText(text);
-  if (!station || !isStationAllowedForField(field, station)) return null;
+  if (!station || !isStationAllowedForField(field, station, session)) return null;
   return station;
 }
 
-function stationHelpText(field: StationField): string {
+function stationHelpText(field: StationField, session?: Pick<BotSession, 'fromStationId'>): string {
   if (field === 'from') {
-    return 'Bu istiqamət üçün başlanğıc yalnız bunlardan biri ola bilər: Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik.';
+    return 'Başlanğıc Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik, Tbilisi-Sərn və ya Qardabani ola bilər.';
+  }
+
+  if (session?.fromStationId && ADY_GEORGIA_STATION_IDS.includes(session.fromStationId as typeof ADY_GEORGIA_STATION_IDS[number])) {
+    return 'Tbilisi-Sərn və ya Qardabanidən gediş üçün son məntəqə Bakı ola bilər.';
   }
 
   return 'Bu istiqamət üçün son məntəqə yalnız Tbilisi-Sərn və ya Qardabani ola bilər.';
