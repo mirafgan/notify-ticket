@@ -1,10 +1,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { chromium, type BrowserContext, type Locator, type Page } from 'playwright';
-import type { AdyStation } from './stations';
+import { chromium, type BrowserContext, type Page } from 'playwright';
+import {
+  getStationById,
+  getTicketStationId,
+  matchStationText,
+  type AdyStation,
+} from './stations';
 
-const SOLD_OUT_TEXT = 'Bütün biletlər satılıb';
-const CONTINUE_TEXT = 'Davam et';
+export const MAX_ADULTS = 4;
+export const MAX_CHILD = 4;
 
 export const AZ_MONTHS = [
   'yanvar',
@@ -47,6 +52,8 @@ export interface RuntimeConfig {
   browserChannel: string;
   browserProfileDir: string;
   screenshotsEnabled: boolean;
+  pageDiagnosticsEnabled: boolean;
+  pageDiagnosticsTextLimit: number;
   artifactsDir: string;
   log?: LogFn;
 }
@@ -74,7 +81,10 @@ export interface AdyRequest {
   to: NormalizedStation;
   targetDates: TargetDate[];
   adults: number;
+  infant: number;
+  child: number;
   maxPrice: number;
+  ticketTypes: string[];
 }
 
 export type StationInput = string | Partial<AdyStation> & {
@@ -92,7 +102,10 @@ export interface AdyRequestInput {
   targetDatesText?: string;
   targetDate?: string;
   adults?: number | string;
+  infant?: number | string;
+  child?: number | string;
   maxPrice?: number | string;
+  ticketTypes?: string | string[];
 }
 
 export type DateSkippedStatus = 'date-not-loaded' | 'date-not-found' | 'date-disabled';
@@ -114,6 +127,7 @@ export interface TicketsFoundResult {
   message: string;
   cheapestPrice: number;
   prices: number[];
+  ticketTypes: string[];
   ticketSearchUrl?: string | null;
   screenshotPath?: string | null;
 }
@@ -147,6 +161,7 @@ interface SearchOutcome {
   status: 'tickets-found';
   cheapestPrice: number;
   prices: number[];
+  ticketTypes: string[];
   ticketSearchUrl?: string | null;
 }
 
@@ -164,6 +179,11 @@ function numberFromEnv(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function nonNegativeIntegerFromEnv(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 export function buildRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
   overrides: Partial<RuntimeConfig> = {},
@@ -177,6 +197,8 @@ export function buildRuntimeConfig(
     browserChannel: env.ADY_BROWSER_CHANNEL || '',
     browserProfileDir: env.ADY_BROWSER_PROFILE_DIR || '.browser-profile',
     screenshotsEnabled: parseBoolean(env.ADY_SCREENSHOTS_ENABLED, true),
+    pageDiagnosticsEnabled: parseBoolean(env.ADY_PAGE_DIAGNOSTICS_ENABLED, true),
+    pageDiagnosticsTextLimit: numberFromEnv(env.ADY_PAGE_DIAGNOSTICS_TEXT_LIMIT, 1800),
     artifactsDir: env.ADY_ARTIFACTS_DIR || 'artifacts',
     ...overrides,
   };
@@ -193,7 +215,9 @@ export function buildRequestFromEnv(env: NodeJS.ProcessEnv = process.env): AdyRe
       query: env.ADY_TO_QUERY || 'TBİLİSİ',
     },
     targetDates: env.ADY_TARGET_DATES || env.ADY_TARGET_DATE || '2026-08-01,2026-08-02,2026-08-03,2026-08-04',
-    adults: numberFromEnv(env.ADY_ADULTS, 3),
+    adults: nonNegativeIntegerFromEnv(env.ADY_ADULTS, 3),
+    infant: nonNegativeIntegerFromEnv(env.ADY_INFANT, 0),
+    child: nonNegativeIntegerFromEnv(env.ADY_CHILD, 0),
     maxPrice: numberFromEnv(env.ADY_MAX_PRICE, 87.72),
   });
 }
@@ -209,15 +233,16 @@ export function normalizeRequest(input: AdyRequestInput | AdyRequest): AdyReques
   });
   const targetDates = normalizeTargetDates(input);
   const adults = Number(input.adults);
+  const infant = Number(input.infant ?? 0);
+  const child = Number(input.child ?? 0);
   const maxPrice = Number(input.maxPrice);
+  const ticketTypes = normalizeTicketTypes(input.ticketTypes);
 
   if (!from.exact || !to.exact) {
     throw new Error('Haradan və haraya stansiyaları yazılmalıdır.');
   }
 
-  if (!Number.isInteger(adults) || adults < 1) {
-    throw new Error('Sərnişin sayı müsbət tam ədəd olmalıdır.');
-  }
+  validatePassengers({ adults, infant, child });
 
   if (!Number.isFinite(maxPrice) || maxPrice <= 0) {
     throw new Error('Maksimum qiymət müsbət rəqəm olmalıdır.');
@@ -232,8 +257,32 @@ export function normalizeRequest(input: AdyRequestInput | AdyRequest): AdyReques
     to,
     targetDates,
     adults,
+    infant,
+    child,
     maxPrice,
+    ticketTypes,
   };
+}
+
+export function validatePassengers(passengers: Pick<AdyRequest, 'adults' | 'infant' | 'child'>): void {
+  const { adults, infant, child } = passengers;
+  if (!Number.isInteger(adults) || adults < 1 || adults > MAX_ADULTS) {
+    throw new Error(`Böyük sərnişin sayı 1-${MAX_ADULTS} arasında tam ədəd olmalıdır.`);
+  }
+
+  const maxInfant = MAX_ADULTS - adults;
+  if (!Number.isInteger(infant) || infant < 0 || infant > maxInfant) {
+    throw new Error(`Uşaq (10 yaşa qədər) sayı 0-${maxInfant} arasında tam ədəd olmalıdır.`);
+  }
+
+  if (!Number.isInteger(child) || child < 0 || child > MAX_CHILD) {
+    throw new Error(`Körpə sayı 0-${MAX_CHILD} arasında tam ədəd olmalıdır.`);
+  }
+}
+
+function normalizeTicketTypes(value: string | string[] | undefined): string[] {
+  const values = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return [...new Set(values.map((item) => item.trim()).filter(Boolean))];
 }
 
 function normalizeTargetDates(input: AdyRequestInput | AdyRequest): TargetDate[] {
@@ -248,14 +297,15 @@ function normalizeTargetDates(input: AdyRequestInput | AdyRequest): TargetDate[]
 
 function normalizeStation(station: StationInput | undefined): NormalizedStation {
   if (typeof station === 'string') {
-    return {
-      id: station,
-      exact: station,
-      query: station,
-      label: station,
-      country: '',
-    };
+    const knownStation = getStationById(station) ?? matchStationText(station);
+    if (knownStation) return { ...knownStation };
+    return { id: station, exact: station, query: station, label: station, country: '' };
   }
+
+  const knownStation =
+    (station?.id ? getStationById(station.id) : null) ??
+    matchStationText(station?.exact || station?.label || station?.value || station?.query || '');
+  if (knownStation) return { ...knownStation };
 
   const exact = station?.exact || station?.label || station?.value || '';
   return {
@@ -314,7 +364,40 @@ export function createScrapeKey(input: AdyRequestInput | AdyRequest): string {
     to: request.to.exact,
     dates,
     adults: request.adults,
+    infant: request.infant,
+    child: request.child,
   });
+}
+
+export function buildTicketSearchUrl(
+  requestInput: AdyRequestInput | AdyRequest,
+  target: TargetDate,
+  baseUrl = 'https://ticket.ady.az/',
+): string {
+  const request = normalizeRequest(requestInput);
+  const fromStationId = getTicketStationId(request.from.id);
+  const toStationId = getTicketStationId(request.to.id);
+
+  if (fromStationId == null || toStationId == null) {
+    throw new Error(
+      `Birbaşa URL axtarışı bu marşrut üçün dəstəklənmir: ${request.from.label} -> ${request.to.label}.`,
+    );
+  }
+
+  const url = new URL(baseUrl);
+  const date = `${target.day}/${target.month}/${target.year}`;
+  url.pathname = `/az/ticket-search/${request.from.id}-${request.to.id}`;
+  url.search = new URLSearchParams({
+    from_station: String(fromStationId),
+    to_station: String(toStationId),
+    date,
+    return_date: date,
+    two_way: 'false',
+    child: String(request.child),
+    infant: String(request.infant),
+    adults: String(request.adults),
+  }).toString();
+  return url.href;
 }
 
 function now(): string {
@@ -442,344 +525,63 @@ async function runCheck(
   runtimeConfig: RuntimeConfig,
 ): Promise<CheckResult> {
   const log = runtimeConfig.log ?? defaultLog;
-  log(`Yoxlama başlayır: ${request.from.exact} -> ${request.to.exact}, ${target.displayValue}, ${request.adults} b.`);
+  const ticketSearchUrl = buildTicketSearchUrl(request, target, runtimeConfig.url);
+  log(
+    `Yoxlama başlayır: ${request.from.exact} -> ${request.to.exact}, ${target.displayValue}, ${formatPassengers(request)}.`,
+  );
 
-  await waitForHomeReady(page, runtimeConfig);
-  await closeOpenPopups(page);
-
-  await selectStation(page, 'form.search__wrapper .form-group--to', request.from.query, request.from.exact);
-  await selectStation(page, 'form.search__wrapper .form-group--from', request.to.query, request.to.exact);
-
-  const dateResult = await selectTargetDate(page, target);
-  if (!dateResult.ok) {
-    return { ...dateResult, target, message: `${target.displayValue}: ${dateResult.message}` };
-  }
-  log(dateResult.message);
-
-  await setAdults(page, request.adults);
-
-  const result = await submitSearch(page, runtimeConfig);
-  if (result === 'sold-out') {
-    return { ok: true, target, status: 'sold-out', message: `${target.displayValue}: "${SOLD_OUT_TEXT}" modalı göründü.` };
-  }
-
-  if (result === 'unknown') {
-    const screenshotPath = await saveScreenshot(page, 'unknown', runtimeConfig);
-    return {
-      ok: false,
-      target,
-      status: 'unknown',
-      message: `${target.displayValue}: Nəticə ${Math.round(runtimeConfig.resultWaitMs / 1000)} saniyəyə tam bilinmədi; notification göndərilmir.`,
-      screenshotPath,
-    };
-  }
-
-  const screenshotPath = await saveScreenshot(page, 'available', runtimeConfig);
-  return {
-    ok: true,
-    target,
-    status: 'tickets-found',
-    cheapestPrice: result.cheapestPrice,
-    prices: result.prices,
-    ticketSearchUrl: result.ticketSearchUrl,
-    message: `${target.displayValue}: Bilet görünür. Ən ucuz qiymət ${formatPrice(result.cheapestPrice)} AZN.`,
-    screenshotPath,
-  };
-}
-
-async function waitForHomeReady(page: Page, runtimeConfig: RuntimeConfig): Promise<void> {
-  await page.goto(runtimeConfig.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-  const form = page.locator('form.search__wrapper');
   try {
-    await form.waitFor({ state: 'visible', timeout: 90000 });
-  } catch {
-    const title = await page.title().catch(() => '');
-    throw new Error(`Axtarış formu açılmadı. Title: "${title}". Cloudflare yoxlaması varsa, görünən browserdə tamamla və yenidən işə sal.`);
-  }
-}
-
-async function closeOpenPopups(page: Page): Promise<void> {
-  const closeButtons = page.locator('.popup.open .popup__close-btn');
-  const count = await closeButtons.count().catch(() => 0);
-
-  for (let index = count - 1; index >= 0; index -= 1) {
-    await closeButtons.nth(index).click({ timeout: 1000 }).catch(() => {});
-  }
-}
-
-async function selectStation(page: Page, groupSelector: string, query: string, exactText: string): Promise<void> {
-  const group = page.locator(groupSelector);
-  const input = group.locator('input.form-control');
-
-  await input.waitFor({ state: 'visible', timeout: 30000 });
-  await input.click();
-  await input.fill(query);
-
-  const option = group.locator('.custom-select button').filter({ hasText: exactText });
-  await option.waitFor({ state: 'visible', timeout: 30000 });
-  await option.click();
-
-  await waitForInputValue(input, exactText, 10000);
-}
-
-async function selectTargetDate(page: Page, target: TargetDate): Promise<DateSelectionResult> {
-  const input = page.locator('form.search__wrapper input[placeholder="Gediş tarixi"]');
-  await input.waitFor({ state: 'visible', timeout: 30000 });
-  await input.click();
-
-  const calendar = page.locator('form.search__wrapper .calendar.open');
-  await calendar.waitFor({ state: 'visible', timeout: 30000 });
-
-  const month = calendar.locator('.calendar__table__item').filter({ hasText: target.monthLabel });
-  const monthCount = await month.count();
-
-  if (monthCount === 0) {
-    return {
-      ok: false,
-      status: 'date-not-loaded',
-      message: `${target.monthLabel} ayı calendar-da görünmədi.`,
-    };
-  }
-
-  const day = month.locator('td').filter({ hasText: new RegExp(`^\\s*${target.day}(\\s|$)`) });
-  const dayCount = await day.count();
-
-  if (dayCount === 0) {
-    return {
-      ok: false,
-      status: 'date-not-found',
-      message: `${target.displayValue} calendar-da tapılmadı.`,
-    };
-  }
-
-  const dayCell = day.first();
-  const className = (await dayCell.getAttribute('class')) || '';
-  if (className.split(/\s+/).includes('old')) {
-    return {
-      ok: false,
-      status: 'date-disabled',
-      message: `${target.displayValue} hazırda qeyri-aktivdir; axtarış göndərilmir.`,
-    };
-  }
-
-  await dayCell.scrollIntoViewIfNeeded();
-  await dayCell.click();
-  await waitForInputValue(input, target.displayValue, 10000);
-
-  return { ok: true, status: 'date-selected', message: `${target.displayValue} seçildi.` };
-}
-
-async function setAdults(page: Page, adults: number): Promise<void> {
-  const passengerInput = page.locator('form.search__wrapper input[placeholder="Sərnişinlər"]');
-  await passengerInput.waitFor({ state: 'visible', timeout: 30000 });
-  await passengerInput.click();
-
-  const adultItem = page.locator('form.search__wrapper .form-group--count .count-select__item').first();
-  const adultValueInput = adultItem.locator('input.form-control');
-  const plus = adultItem.locator('button.form-button--plus');
-  const minus = adultItem.locator('button.minus, button.form-button--minus');
-
-  await adultValueInput.waitFor({ state: 'visible', timeout: 10000 });
-
-  let current = Number(await adultValueInput.inputValue());
-  while (current < adults) {
-    await plus.click();
-    current += 1;
-  }
-
-  while (current > adults) {
-    await minus.click();
-    current -= 1;
-  }
-
-  await waitForInputValue(passengerInput, `${adults} b.`, 10000);
-}
-
-async function submitSearch(page: Page, runtimeConfig: RuntimeConfig): Promise<SearchOutcome | 'sold-out' | 'unknown'> {
-  const searchButton = page.locator('form.search__wrapper button.btn.btn-blue').filter({ hasText: 'Axtar' });
-  await searchButton.waitFor({ state: 'visible', timeout: 30000 });
-  const ticketSearchUrlCapture = await createTicketSearchUrlCapture(page);
-  const ticketSearchUrlPromise = ticketSearchUrlCapture.waitForUrl(5000);
-  await searchButton.click();
-
-  const continueButton = page.locator('.popup.open button.btn.btn-blue').filter({ hasText: CONTINUE_TEXT });
-  const appeared = await waitForVisible(continueButton, 15000);
-  if (appeared) {
-    const log = runtimeConfig.log ?? defaultLog;
-    log(`"${CONTINUE_TEXT}" modalı göründü, basılır.`);
-    await continueButton.click();
-  }
-
-  const result = await waitForSearchOutcome(page, runtimeConfig);
-  try {
-    const ticketSearchUrl = await ticketSearchUrlPromise;
-    if (typeof result === 'object') {
+    await openTicketSearch(page, ticketSearchUrl);
+    const result = await waitForSearchOutcome(page, runtimeConfig);
+    if (result === 'sold-out') {
       return {
-        ...result,
-        ticketSearchUrl: ticketSearchUrl ?? await ticketSearchUrlCapture.getUrl(),
+        ok: true,
+        target,
+        status: 'sold-out',
+        message: `${target.displayValue}: Uyğun bilet yoxdur (.ticket__item tapılmadı).`,
       };
     }
-  } finally {
-    ticketSearchUrlCapture.dispose();
-  }
 
-  return result;
-}
-
-interface TicketSearchUrlCapture {
-  waitForUrl(timeoutMs: number): Promise<string | null>;
-  getUrl(): Promise<string | null>;
-  dispose(): void;
-}
-
-async function createTicketSearchUrlCapture(page: Page): Promise<TicketSearchUrlCapture> {
-  let capturedUrl: string | null = null;
-  let resolveWaiter: ((url: string | null) => void) | null = null;
-  let timeout: NodeJS.Timeout | null = null;
-
-  const settle = (url: string | null) => {
-    if (!resolveWaiter) return;
-    if (timeout) {
-      clearTimeout(timeout);
-      timeout = null;
+    if (result === 'unknown') {
+      await logPageDiagnostics(page, runtimeConfig, 'search-outcome-unknown');
+      const screenshotPath = await saveScreenshot(page, 'unknown', runtimeConfig);
+      return {
+        ok: false,
+        target,
+        status: 'unknown',
+        message: `${target.displayValue}: Nəticə ${Math.round(runtimeConfig.resultWaitMs / 1000)} saniyəyə tam bilinmədi; notification göndərilmir.`,
+        screenshotPath,
+      };
     }
 
-    const resolve = resolveWaiter;
-    resolveWaiter = null;
-    resolve(url);
-  };
-
-  const captureUrl = (url: string) => {
-    if (!url.includes('/ticket-search/')) return;
-    capturedUrl = url;
-    settle(url);
-  };
-
-  const handleFrameNavigated = () => {
-    captureUrl(page.url());
-  };
-
-  const handleRequest = (request: { url(): string }) => {
-    captureUrl(request.url());
-  };
-
-  page.on('framenavigated', handleFrameNavigated);
-  page.on('request', handleRequest);
-  await resetInPageTicketSearchUrlCapture(page);
-
-  return {
-    waitForUrl(timeoutMs: number) {
-      if (capturedUrl) return Promise.resolve(capturedUrl);
-
-      const domWait = waitForInPageTicketSearchUrl(page, timeoutMs).then((url) => {
-        if (url) captureUrl(url);
-        return url;
-      });
-
-      const eventWait = new Promise<string | null>((resolve) => {
-        resolveWaiter = resolve;
-        timeout = setTimeout(async () => {
-          const domUrl = await getInPageCapturedTicketSearchUrl(page);
-          if (domUrl) {
-            capturedUrl = domUrl;
-          }
-          settle(capturedUrl);
-        }, timeoutMs);
-        timeout.unref?.();
-      });
-
-      return Promise.race([eventWait, domWait]).then((url) => url ?? capturedUrl);
-    },
-    getUrl() {
-      if (capturedUrl) return Promise.resolve(capturedUrl);
-      return getInPageCapturedTicketSearchUrl(page).then((url) => {
-        if (url) capturedUrl = url;
-        return capturedUrl;
-      });
-    },
-    dispose() {
-      page.off('framenavigated', handleFrameNavigated);
-      page.off('request', handleRequest);
-      if (timeout) {
-        clearTimeout(timeout);
-        timeout = null;
-      }
-      resolveWaiter = null;
-    },
-  };
-}
-
-async function resetInPageTicketSearchUrlCapture(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    type AdyWindow = Window & {
-      __adyTicketSearchUrl?: string | null;
-      __adyTicketSearchUrlPatched?: boolean;
+    const screenshotPath = await saveScreenshot(page, 'available', runtimeConfig);
+    const priceText = result.cheapestPrice > 0 ? ` Ən ucuz qiymət ${formatPrice(result.cheapestPrice)} AZN.` : '';
+    return {
+      ok: true,
+      target,
+      status: 'tickets-found',
+      cheapestPrice: result.cheapestPrice,
+      prices: result.prices,
+      ticketTypes: result.ticketTypes,
+      ticketSearchUrl,
+      message: `${target.displayValue}: Bilet görünür. Tip: ${formatTicketTypes(result.ticketTypes)}.${priceText}`,
+      screenshotPath,
     };
-
-    const adyWindow = window as AdyWindow;
-    const capture = (url?: string | URL | null) => {
-      if (url == null) return;
-
-      try {
-        const absoluteUrl = new URL(String(url), window.location.href).href;
-        if (absoluteUrl.includes('/ticket-search/')) {
-          adyWindow.__adyTicketSearchUrl = absoluteUrl;
-        }
-      } catch {
-        // Ignore malformed transient router values.
-      }
-    };
-
-    if (!adyWindow.__adyTicketSearchUrlPatched) {
-      const pushState = history.pushState.bind(history);
-      const replaceState = history.replaceState.bind(history);
-
-      history.pushState = ((data: unknown, unused: string, url?: string | URL | null) => {
-        capture(url);
-        return pushState(data, unused, url);
-      }) as History['pushState'];
-
-      history.replaceState = ((data: unknown, unused: string, url?: string | URL | null) => {
-        capture(url);
-        return replaceState(data, unused, url);
-      }) as History['replaceState'];
-
-      adyWindow.__adyTicketSearchUrlPatched = true;
-    }
-
-    adyWindow.__adyTicketSearchUrl = null;
-  });
-}
-
-async function waitForInPageTicketSearchUrl(page: Page, timeoutMs: number): Promise<string | null> {
-  try {
-    const handle = await page.waitForFunction(
-      () => {
-        const adyWindow = window as Window & { __adyTicketSearchUrl?: string | null };
-        if (adyWindow.__adyTicketSearchUrl) return adyWindow.__adyTicketSearchUrl;
-        return false;
-      },
-      undefined,
-      { timeout: timeoutMs },
-    );
-    return await handle.jsonValue() as string;
-  } catch {
-    return null;
+  } catch (error) {
+    await logPageDiagnostics(page, runtimeConfig, 'check-error');
+    throw error;
   }
 }
 
-async function getInPageCapturedTicketSearchUrl(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    const adyWindow = window as Window & { __adyTicketSearchUrl?: string | null };
-    return adyWindow.__adyTicketSearchUrl ?? null;
-  }).catch(() => null);
+async function openTicketSearch(page: Page, ticketSearchUrl: string): Promise<void> {
+  await page.goto(ticketSearchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
 }
 
 async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): Promise<SearchOutcome | 'sold-out' | 'unknown'> {
   try {
     const resultHandle = await page.waitForFunction(
-      ({ soldOutText }: { soldOutText: string }) => {
+      () => {
         const isVisible = (element: Element) => {
           const rect = element.getBoundingClientRect();
           const style = getComputedStyle(element);
@@ -827,29 +629,37 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
           return [...new Set(prices)].sort((a, b) => a - b);
         };
 
-        const soldOutModal = [...document.querySelectorAll('.popup.open')].find(
-          (element) => isVisible(element) && elementText(element).includes(soldOutText),
-        );
-        if (soldOutModal) return 'sold-out';
+        const extractVisibleTicketTypes = () => {
+          const labels = [...document.querySelectorAll('.ticket__item .ticket__type li label nobr, .ticket__type li label nobr')]
+            .filter(isVisible)
+            .map((element) => elementText(element))
+            .filter(Boolean);
+
+          return [...new Set(labels)];
+        };
 
         const loading = [...document.querySelectorAll('[class*="loading"], [class*="loader"], [class*="spinner"], .lds-ring')].some(
           (element) => isVisible(element),
         );
-        const text = document.body.innerText || '';
-        if (!loading && text.includes('Qatar seçimi')) {
-          const prices = extractVisiblePrices();
-          if (prices.length > 0) {
-            return {
-              status: 'tickets-found',
-              cheapestPrice: prices[0],
-              prices,
-            };
-          }
+        if (document.readyState !== 'complete' || loading) return false;
+
+        const pageText = document.body.innerText || document.body.textContent || '';
+        if (/cloudflare|just a moment|checking if the site connection is secure|verify you are human/i.test(pageText)) {
+          return false;
         }
 
-        return false;
+        const ticketItems = [...document.querySelectorAll('.ticket__item')].filter(isVisible);
+        if (ticketItems.length === 0) return 'sold-out';
+
+        const prices = extractVisiblePrices();
+        const ticketTypes = extractVisibleTicketTypes();
+        return {
+          status: 'tickets-found',
+          cheapestPrice: prices[0] ?? 0,
+          prices,
+          ticketTypes,
+        };
       },
-      { soldOutText: SOLD_OUT_TEXT },
       { timeout: runtimeConfig.resultWaitMs },
     );
 
@@ -857,27 +667,6 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
     return value as SearchOutcome | 'sold-out';
   } catch {
     return 'unknown';
-  }
-}
-
-async function waitForInputValue(locator: Locator, expectedPart: string, timeoutMs: number): Promise<string> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const value = await locator.inputValue().catch(() => '');
-    if (value.includes(expectedPart)) return value;
-    await delay(200);
-  }
-
-  const value = await locator.inputValue().catch(() => '');
-  throw new Error(`Input dəyəri gözlənilən olmadı. Gözlənən: "${expectedPart}", gələn: "${value}"`);
-}
-
-async function waitForVisible(locator: Locator, timeoutMs: number): Promise<boolean> {
-  try {
-    await locator.waitFor({ state: 'visible', timeout: timeoutMs });
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -892,8 +681,84 @@ async function saveScreenshot(page: Page, prefix: string, runtimeConfig: Runtime
   return filePath;
 }
 
+async function logPageDiagnostics(page: Page, runtimeConfig: RuntimeConfig, reason: string): Promise<void> {
+  if (!runtimeConfig.pageDiagnosticsEnabled) return;
+
+  const log = runtimeConfig.log ?? defaultLog;
+  const label = sanitizeDiagnosticLabel(reason);
+
+  try {
+    const snapshot = await page.evaluate(() => {
+      const bodyText = (document.body?.innerText || document.body?.textContent || '').replace(/\s+/g, ' ').trim();
+      const visible = (selector: string) => {
+        const element = document.querySelector(selector);
+        if (!element) return false;
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+
+      return {
+        url: window.location.href,
+        title: document.title,
+        readyState: document.readyState,
+        bodyText,
+        ticketItemCount: document.querySelectorAll('.ticket__item').length,
+        hasVisibleLoader: visible('[class*="loading"], [class*="loader"], [class*="spinner"], .lds-ring'),
+        hasCloudflareSignals: /cloudflare|just a moment|checking if the site connection is secure|verify you are human/i.test(bodyText),
+      };
+    });
+    const bodyText = truncateForLog(snapshot.bodyText || '[empty]', runtimeConfig.pageDiagnosticsTextLimit);
+
+    log(`[ADY diagnostic:${label}] url=${snapshot.url}`);
+    log(`[ADY diagnostic:${label}] title="${snapshot.title}" readyState=${snapshot.readyState} ticketItems=${snapshot.ticketItemCount} visibleLoader=${snapshot.hasVisibleLoader} cloudflareSignals=${snapshot.hasCloudflareSignals}`);
+    log(`[ADY diagnostic:${label}] body="${bodyText}"`);
+  } catch (error) {
+    log(`[ADY diagnostic:${label}] page snapshot oxunmadı: ${getErrorMessage(error)}`);
+  }
+
+  const screenshotPath = await saveDiagnosticScreenshot(page, label, runtimeConfig);
+  if (screenshotPath) {
+    log(`[ADY diagnostic:${label}] screenshot=${screenshotPath}`);
+  }
+}
+
+async function saveDiagnosticScreenshot(page: Page, label: string, runtimeConfig: RuntimeConfig): Promise<string | null> {
+  try {
+    const dir = path.resolve(process.cwd(), runtimeConfig.artifactsDir);
+    await fs.mkdir(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filePath = path.join(dir, `diagnostic-${label}-${stamp}.png`);
+    await page.screenshot({ path: filePath, fullPage: true });
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
+function truncateForLog(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`;
+}
+
+function sanitizeDiagnosticLabel(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'page';
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function formatPrice(value: number): string {
   return Number(value).toFixed(2);
+}
+
+export function formatPassengers(passengers: Pick<AdyRequest, 'adults' | 'infant' | 'child'>): string {
+  return `Böyük: ${passengers.adults}, Uşaq (10 yaşa qədər): ${passengers.infant}, Körpə: ${passengers.child}`;
+}
+
+function formatTicketTypes(ticketTypes: string[]): string {
+  return ticketTypes.length > 0 ? ticketTypes.join(', ') : 'bilinmir';
 }
 
 export async function delay(ms: number): Promise<void> {

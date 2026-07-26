@@ -7,6 +7,7 @@ import {
   buildRequestFromEnv,
   buildRuntimeConfig,
   delay,
+  formatPassengers,
   formatPrice,
   launchBrowser,
   runChecks,
@@ -37,7 +38,7 @@ async function notifyAvailable(context: BrowserContext, result: PriceSummaryResu
   const priceText = result.cheapestPrice == null ? '' : ` Ən ucuz: ${formatPrice(result.cheapestPrice)} AZN.`;
   const targetText = result.target ? `${result.target.displayValue}, ` : '';
   const linkText = result.ticketSearchUrl ? ` Link: ${result.ticketSearchUrl}` : '';
-  const message = `${request.from.exact} -> ${request.to.exact}, ${targetText}${request.adults} b.${priceText}${linkText}`;
+  const message = `${request.from.exact} -> ${request.to.exact}, ${targetText}${formatPassengers(request)}.${priceText}${linkText}`;
   showWindowsNotification('ADY bilet tapıla bilər', message);
   log(`Windows notification göndərildi.${result.screenshotPath ? ` Screenshot: ${result.screenshotPath}` : ''}`);
 
