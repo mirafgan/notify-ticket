@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { chromium, type BrowserContext, type Page } from 'playwright';
+import { chromium, type BrowserContext, type Page, type Response } from 'playwright';
 import {
   getStationById,
   getTicketStationId,
@@ -50,6 +50,7 @@ export interface RuntimeConfig {
   headless: boolean;
   notifyOnDateDisabled: boolean;
   browserChannel: string;
+  browserCdpUrl: string;
   browserProfileDir: string;
   screenshotsEnabled: boolean;
   pageDiagnosticsEnabled: boolean;
@@ -110,7 +111,7 @@ export interface AdyRequestInput {
 
 export type DateSkippedStatus = 'date-not-loaded' | 'date-not-found' | 'date-disabled';
 export type CheckStatus = DateSkippedStatus | 'sold-out' | 'unknown' | 'tickets-found';
-export type SummaryStatus = 'price-ok' | 'price-too-high' | 'date-disabled' | 'no-match';
+export type SummaryStatus = 'price-ok' | 'price-too-high' | 'date-disabled' | 'no-match' | 'unknown';
 
 export interface BaseCheckResult {
   ok: boolean;
@@ -165,6 +166,11 @@ interface SearchOutcome {
   ticketSearchUrl?: string | null;
 }
 
+type TicketSearchLoadResult =
+  | { status: 'ready' }
+  | { status: 'sold-out'; message: string }
+  | { status: 'unknown'; message: string };
+
 type DateSelectionResult =
   | { ok: true; status: 'date-selected'; message: string }
   | { ok: false; status: DateSkippedStatus; message: string };
@@ -195,6 +201,7 @@ export function buildRuntimeConfig(
     headless: parseBoolean(env.ADY_HEADLESS, false),
     notifyOnDateDisabled: parseBoolean(env.ADY_NOTIFY_ON_DATE_DISABLED, false),
     browserChannel: env.ADY_BROWSER_CHANNEL || '',
+    browserCdpUrl: env.ADY_BROWSER_CDP_URL || '',
     browserProfileDir: env.ADY_BROWSER_PROFILE_DIR || '.browser-profile',
     screenshotsEnabled: parseBoolean(env.ADY_SCREENSHOTS_ENABLED, true),
     pageDiagnosticsEnabled: parseBoolean(env.ADY_PAGE_DIAGNOSTICS_ENABLED, true),
@@ -410,6 +417,24 @@ function defaultLog(message: string): void {
 
 export async function launchBrowser(runtimeConfigInput: Partial<RuntimeConfig> = {}): Promise<BrowserContext> {
   const runtimeConfig = buildRuntimeConfig(process.env, runtimeConfigInput);
+  const log = runtimeConfig.log ?? defaultLog;
+
+  if (runtimeConfig.browserCdpUrl) {
+    const browser = await chromium.connectOverCDP(runtimeConfig.browserCdpUrl);
+    const context = browser.contexts()[0];
+    if (!context) {
+      await browser.close().catch(() => {});
+      throw new Error(`CDP browser context tapılmadı: ${runtimeConfig.browserCdpUrl}`);
+    }
+
+    // A CDP browser is launched outside this process; disconnecting must not close the user's Chrome session.
+    context.close = async () => {
+      await browser.close();
+    };
+    log(`Mövcud Chrome sessiyasına qoşuldu (CDP: ${runtimeConfig.browserCdpUrl}).`);
+    return context;
+  }
+
   const userDataDir = path.resolve(process.cwd(), runtimeConfig.browserProfileDir);
   await fs.mkdir(userDataDir, { recursive: true });
 
@@ -430,7 +455,6 @@ export async function launchBrowser(runtimeConfigInput: Partial<RuntimeConfig> =
     try {
       const options = channel ? { ...baseOptions, channel } : baseOptions;
       const context = await chromium.launchPersistentContext(userDataDir, options);
-      const log = runtimeConfig.log ?? defaultLog;
       log(`Browser açıldı${channel ? ` (${channel})` : ''}.`);
       return context;
     } catch (error) {
@@ -478,6 +502,7 @@ export function summarizeBatchForMaxPrice(
   const runtimeConfig = buildRuntimeConfig(process.env, runtimeConfigInput);
   const request = normalizeRequest(requestInput);
   let cheapestTooHigh: TicketsFoundResult | null = null;
+  const unknownResults: CheckResult[] = [];
 
   for (const result of batch.results) {
     if (result.status === 'tickets-found' && result.cheapestPrice <= request.maxPrice) {
@@ -494,6 +519,10 @@ export function summarizeBatchForMaxPrice(
       }
     }
 
+    if (result.status === 'unknown') {
+      unknownResults.push(result);
+    }
+
     if (result.status === 'date-disabled' && runtimeConfig.notifyOnDateDisabled) {
       return {
         ...result,
@@ -507,6 +536,15 @@ export function summarizeBatchForMaxPrice(
       ...cheapestTooHigh,
       status: 'price-too-high',
       message: `${cheapestTooHigh.target.displayValue}: Ən ucuz qiymət ${formatPrice(cheapestTooHigh.cheapestPrice)} AZN-dir; limit ${formatPrice(request.maxPrice)} AZN. Notification göndərilmir.`,
+    };
+  }
+
+  if (unknownResults.length > 0) {
+    return {
+      ok: false,
+      status: 'unknown',
+      results: batch.results,
+      message: `${unknownResults.map((result) => result.target.displayValue).join(', ')} üçün ADY nəticəsi tam müəyyən olmadı; növbəti yoxlamada yenidən cəhd ediləcək.`,
     };
   }
 
@@ -531,7 +569,28 @@ async function runCheck(
   );
 
   try {
-    await openTicketSearch(page, ticketSearchUrl);
+    const loadResult = await openTicketSearch(page, ticketSearchUrl, runtimeConfig);
+    if (loadResult.status === 'unknown') {
+      await logPageDiagnostics(page, runtimeConfig, 'ticket-api-error');
+      const screenshotPath = await saveScreenshot(page, 'unknown', runtimeConfig);
+      return {
+        ok: false,
+        target,
+        status: 'unknown',
+        message: `${target.displayValue}: ${loadResult.message} Notification göndərilmir.`,
+        screenshotPath,
+      };
+    }
+
+    if (loadResult.status === 'sold-out') {
+      return {
+        ok: true,
+        target,
+        status: 'sold-out',
+        message: `${target.displayValue}: ${loadResult.message}`,
+      };
+    }
+
     const result = await waitForSearchOutcome(page, runtimeConfig);
     if (result === 'sold-out') {
       return {
@@ -573,9 +632,62 @@ async function runCheck(
   }
 }
 
-async function openTicketSearch(page: Page, ticketSearchUrl: string): Promise<void> {
-  await page.goto(ticketSearchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+async function openTicketSearch(
+  page: Page,
+  ticketSearchUrl: string,
+  runtimeConfig: RuntimeConfig,
+): Promise<TicketSearchLoadResult> {
+  const ticketApiResponse = page.waitForResponse(
+    (response) => response.url().includes('/ticket-api/get_traintrip') && response.request().method() === 'POST',
+    { timeout: runtimeConfig.resultWaitMs },
+  );
+
+  try {
+    await page.goto(ticketSearchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+    const response = await ticketApiResponse;
+    const result = await getTicketApiResult(response);
+    if (result.status !== 'ready') return result;
+
+    // The ticket page renders the response asynchronously after the API resolves.
+    await delay(500);
+    return { status: 'ready' };
+  } catch (error) {
+    return {
+      status: 'unknown',
+      message: `ADY bilet API cavabı alınmadı: ${getErrorMessage(error)}.`,
+    };
+  }
+}
+
+async function getTicketApiResult(response: Response): Promise<TicketSearchLoadResult> {
+  const payload = await response.json().catch(() => null);
+  return classifyTicketApiResult(response.status(), payload);
+}
+
+export function classifyTicketApiResult(status: number, payload: unknown): TicketSearchLoadResult {
+  const response = isRecord(payload) ? payload : {};
+  const message = typeof response.message === 'string' ? response.message.trim() : '';
+
+  if (status < 200 || status >= 300) {
+    return {
+      status: 'unknown',
+      message: `ADY bilet API xətası (${status})${message ? `: ${message}.` : '.'}`,
+    };
+  }
+
+  if (response.error === true) {
+    return {
+      status: 'sold-out',
+      message: `Uyğun bilet yoxdur${message ? `: ${message}.` : '.'}`,
+    };
+  }
+
+  return { status: 'ready' };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value != null;
 }
 
 async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): Promise<SearchOutcome | 'sold-out' | 'unknown'> {
@@ -597,36 +709,19 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
         const elementText = (element: Element) => ((element as HTMLElement).innerText || element.textContent || '').replace(/\s+/g, ' ').trim();
 
         const extractVisiblePrices = () => {
-          const prices: number[] = [];
-          const elements = [...document.querySelectorAll('body *')].filter(isVisible);
+          return [...document.querySelectorAll('a.ticket__price > span')]
+            .filter(isVisible)
+            .map((element) => elementText(element))
+            .map((text) => {
+              const match = text.match(/(\d{1,3}(?:[\s\u00a0]\d{3})*[.,]\d{2})/);
+              if (!match) return null;
 
-          for (const element of elements) {
-            const text = elementText(element);
-            if (!text) continue;
-
-            const className = String(element.className || '');
-            const hasManatSvg = [...element.querySelectorAll('use')].some((use) => {
-              const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
-              return href.toLowerCase().includes('manat');
-            });
-            const looksLikePrice =
-              hasManatSvg ||
-              /₼|azn|manat/i.test(text) ||
-              /price|fare|amount|cost|qiym/i.test(className);
-
-            if (!looksLikePrice) continue;
-
-            const regex = /(^|[^\d])(\d{1,4}[.,]\d{2})(?!\d)/g;
-            let match: RegExpExecArray | null;
-            while ((match = regex.exec(text))) {
-              const value = Number(match[2].replace(',', '.'));
-              if (Number.isFinite(value) && value > 0 && value < 1000) {
-                prices.push(value);
-              }
-            }
-          }
-
-          return [...new Set(prices)].sort((a, b) => a - b);
+              const value = Number(match[1].replace(/[\s\u00a0]/g, '').replace(',', '.'));
+              return Number.isFinite(value) && value > 0 ? value : null;
+            })
+            .filter((value): value is number => value != null)
+            .filter((value, index, prices) => prices.indexOf(value) === index)
+            .sort((a, b) => a - b);
         };
 
         const extractVisibleTicketTypes = () => {
@@ -652,6 +747,8 @@ async function waitForSearchOutcome(page: Page, runtimeConfig: RuntimeConfig): P
         if (ticketItems.length === 0) return 'sold-out';
 
         const prices = extractVisiblePrices();
+        if (prices.length === 0) return false;
+
         const ticketTypes = extractVisibleTicketTypes();
         return {
           status: 'tickets-found',
@@ -751,6 +848,14 @@ function getErrorMessage(error: unknown): string {
 
 export function formatPrice(value: number): string {
   return Number(value).toFixed(2);
+}
+
+export function parseTicketPrice(value: string): number | null {
+  const match = value.match(/(\d{1,3}(?:[\s\u00a0]\d{3})*[.,]\d{2})/);
+  if (!match) return null;
+
+  const parsed = Number(match[1].replace(/[\s\u00a0]/g, '').replace(',', '.'));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 export function formatPassengers(passengers: Pick<AdyRequest, 'adults' | 'infant' | 'child'>): string {

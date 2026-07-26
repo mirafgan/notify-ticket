@@ -38,6 +38,7 @@ Bot üçün `.env`-də saxlanan parametrlər:
 - `ADY_RESULT_WAIT_MS`
 - `ADY_HEADLESS`
 - `ADY_BROWSER_CHANNEL`
+- `ADY_BROWSER_CDP_URL` (istəyə bağlı: istifadəçinin açdığı Chrome-a CDP ilə qoşulmaq üçün)
 - `ADY_BROWSER_PROFILE_DIR`
 - `ADY_ARTIFACTS_DIR`
 - `ADY_PAGE_DIAGNOSTICS_ENABLED`
@@ -87,7 +88,7 @@ Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. S
 - Tbilisi-Sərn
 - Qardabani
 
-Tbilisi/Qardabani -> Bakı istiqaməti botda seçilə bilmir.
+Bot həm Azərbaycan stansiyalarından Tbilisi-Sərn/Qardabani istiqamətini, həm də Tbilisi-Sərn və Qardabanidən Bakı istiqamətini dəstəkləyir.
 
 Monitorinq hər `ADY_INTERVAL_MS` intervalında yoxlayır. Default `300000` ms-dir, yəni 5 dəqiqə.
 
@@ -147,7 +148,17 @@ Yoxlama zamanı Playwright ana səhifədə formu doldurmur. Birbaşa `ticket-sea
 
 Qeyd: sayt Cloudflare istifadə edir. Ona görə browser default olaraq görünən rejimdə açılır (`ADY_HEADLESS=false`) və `.browser-profile` qovluğunda sessiyanı saxlayır.
 
+ADY görünməz ReCaptcha yoxlamasında Playwright sessiyasını rədd etsə, Chrome-u ayrı proses kimi remote debugging ilə açıb botu ona qoşa bilərsən:
+
+```powershell
+& 'C:\Program Files\Google\Chrome\Application\chrome.exe' --remote-debugging-port=9223 --user-data-dir="$PWD\.browser-profile"
+$env:ADY_BROWSER_CDP_URL='http://127.0.0.1:9223'
+npm.cmd run check
+```
+
 ## Docker deploy
+
+Docker image normal Google Chrome prosesini başladır və bot ona CDP vasitəsilə qoşulur. Bu, ADY-nin Playwright-in birbaşa yaratdığı sessiyalar üçün qaytardığı ReCaptcha xətasının qarşısını alır. Serverdə ayrıca `ADY_BROWSER_CDP_URL` yazmaq lazım deyil; yalnız container-dən kənar Chrome istifadə edilirsə həmin URL təyin olunur.
 
 Server layout:
 

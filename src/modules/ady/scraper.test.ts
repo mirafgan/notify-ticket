@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildTicketSearchUrl,
+  classifyTicketApiResult,
   createScrapeKey,
   normalizeRequest,
+  parseTicketPrice,
   parseTargetDate,
+  summarizeBatchForMaxPrice,
 } from './scraper';
-import { getTicketStationId } from './stations';
+import { getTicketDestinationStationIds, getTicketStationId } from './stations';
 
 const baseRequest = {
   from: { id: 'baki-dyv' },
@@ -59,6 +62,30 @@ test('maps every Telegram station to its ADY ticket-search ID', () => {
   );
 });
 
+test('allows every other supported ADY station as Tbilisi-Sərn destination', () => {
+  assert.deepEqual(getTicketDestinationStationIds('tbilisi-sern'), [
+    'baki-dyv',
+    'bileceri',
+    'yevlax',
+    'gence',
+    'agstafa',
+    'boyuk-kesik',
+    'qardabani',
+  ]);
+});
+
+test('builds a direct Tbilisi to Baku ticket-search URL', () => {
+  const url = new URL(buildTicketSearchUrl({
+    ...baseRequest,
+    from: { id: 'tbilisi-sern' },
+    to: { id: 'baki-dyv' },
+  }, parseTargetDate('2026-07-31')));
+
+  assert.equal(url.pathname, '/az/ticket-search/tbilisi-sern-baki-dyv');
+  assert.equal(url.searchParams.get('from_station'), '170');
+  assert.equal(url.searchParams.get('to_station'), '232');
+});
+
 test('enforces the four-seat rule for adults and children', () => {
   assert.equal(normalizeRequest(baseRequest).infant, 1);
   assert.throws(
@@ -81,4 +108,39 @@ test('keeps monitoring jobs separate for different passenger compositions', () =
 
   assert.notEqual(createScrapeKey(baseRequest), createScrapeKey(differentChildCount));
   assert.notEqual(createScrapeKey(baseRequest), createScrapeKey(differentInfantCount));
+});
+
+test('does not report an unknown ADY result as no ticket', () => {
+  const request = normalizeRequest(baseRequest);
+  const result = summarizeBatchForMaxPrice({
+    ok: true,
+    status: 'checked',
+    request,
+    results: [{
+      ok: false,
+      target: parseTargetDate('2026-07-31'),
+      status: 'unknown',
+      message: 'ADY bilet API xətası (422): ReCaptcha validation failed.',
+    }],
+  }, request);
+
+  assert.equal(result.status, 'unknown');
+  assert.match(result.message, /nəticəsi tam müəyyən olmadı/);
+});
+
+test('distinguishes an empty ADY result from a ReCaptcha failure', () => {
+  assert.deepEqual(
+    classifyTicketApiResult(200, { error: true, message: 'Boş yer yoxdur' }),
+    { status: 'sold-out', message: 'Uyğun bilet yoxdur: Boş yer yoxdur.' },
+  );
+  assert.deepEqual(
+    classifyTicketApiResult(422, { error: true, message: 'ReCaptcha validation failed' }),
+    { status: 'unknown', message: 'ADY bilet API xətası (422): ReCaptcha validation failed.' },
+  );
+});
+
+test('parses the displayed ticket price text', () => {
+  assert.equal(parseTicketPrice('  213.46 AZN  '), 213.46);
+  assert.equal(parseTicketPrice('1 213,46 AZN'), 1213.46);
+  assert.equal(parseTicketPrice('Qiymət göstərilməyib'), null);
 });
