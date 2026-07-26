@@ -3,6 +3,7 @@ import type { BrowserContext, Page } from 'playwright';
 import {
   buildRuntimeConfig,
   createScrapeKey,
+  formatPassengers,
   formatPrice,
   launchBrowser,
   normalizeRequest,
@@ -419,7 +420,7 @@ export function buildAvailableMessage(request: AdyRequest, matches: TicketsFound
   return [
     'ADY bileti hazır görünür.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
-    `${request.adults} nəfər, zal tipi: ${selectedTicketTypes.join(', ')}`,
+    `${formatPassengers(request)}, zal tipi: ${selectedTicketTypes.join(', ')}`,
     '',
     ...lines,
     '',

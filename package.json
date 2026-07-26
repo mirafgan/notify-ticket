@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/modules/ady/scraper.test.js",
     "start": "npm run build && node dist/monitor.js",
     "bot": "npm run build && node dist/telegram-bot.js",
     "check": "npm run build && node dist/monitor.js --once",

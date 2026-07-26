@@ -42,10 +42,12 @@ Bot üçün `.env`-də saxlanan parametrlər:
 - `ADY_ARTIFACTS_DIR`
 - `ADY_PAGE_DIAGNOSTICS_ENABLED`
 - `ADY_PAGE_DIAGNOSTICS_TEXT_LIMIT`
+- `ADY_ADULTS` (CLI: 1-4)
+- `ADY_INFANT` (CLI: Uşaq, 10 yaşa qədər)
+- `ADY_CHILD` (CLI: Körpə)
 - `ADY_BOT_MAX_CONCURRENT_CHECKS`
 - `ADY_BOT_MAX_CHECKS_PER_SUBSCRIPTION`
 - `ADY_BOT_MAX_DATES`
-- `ADY_BOT_MAX_PASSENGERS`
 - `ADY_BOT_STATIONS_PER_PAGE`
 - `ADY_BOT_STOP_ON_AVAILABLE`
 - `ADY_BOT_SCREENSHOTS_ENABLED`
@@ -63,9 +65,11 @@ Bot axını:
 3. Haradan stansiyası
 4. Haraya stansiyası
 5. Calendar üzərindən 1-4 arası gediş tarixi
-6. Sərnişin sayı
-7. Zal tipi: Komfort, Komfort+, Lüks, Standart+
-8. Təsdiq
+6. Böyük sərnişin sayı (1-4)
+7. Uşaq sayı, 10 yaşa qədər (Böyük + Uşaq maksimum 4)
+8. Körpə sayı (0-4)
+9. Zal tipi: Komfort, Komfort+, Lüks, Standart+
+10. Təsdiq
 
 Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. Sadəcə gediş tarixləri seçilir və bu seçim multi ola bilər, amma maksimum 4 gün seçilə bilər.
 
@@ -87,6 +91,8 @@ Tbilisi/Qardabani -> Bakı istiqaməti botda seçilə bilmir.
 
 Monitorinq hər `ADY_INTERVAL_MS` intervalında yoxlayır. Default `300000` ms-dir, yəni 5 dəqiqə.
 
+Sərnişin URL parametrləri ADY-nin istifadə etdiyi adlarla ötürülür: `adults` — Böyük, `infant` — 10 yaşa qədər Uşaq, `child` — Körpə. Böyük sayı 1-4, Uşaq sayı `0-(4 - Böyük)`, Körpə sayı isə 0-4 arası seçilir.
+
 Uyğun bilet tapılanda bot istifadəçiyə mesaj göndərir:
 
 - marşrut
@@ -101,7 +107,7 @@ Eyni sorğunu bir neçə user seçəndə ayrıca scrape açılmır. Sorğu finge
 - haradan
 - haraya
 - seçilən tarixlər
-- sərnişin sayı
+- Böyük, Uşaq və Körpə sayı
 
 Zal tipi fingerprint-ə daxil edilmir. Beləliklə eyni scrape nəticəsi fərqli zal tipi seçən user-lər üçün təkrar istifadə olunur.
 
@@ -131,11 +137,13 @@ npm.cmd run check
 npm.cmd start
 ```
 
-CLI rejimi hələ qalır, amma Telegram bot axınında marşrut, tarixlər, sərnişin sayı və zal tipi userdən soruşulduğu üçün bu dəyərlər artıq `.env`-də saxlanılmır.
+CLI rejimi hələ qalır. Telegram bot axınında marşrut, tarixlər, sərnişin sayı və zal tipi userdən soruşulur; CLI üçün sərnişin sayları `.env`-də `ADY_ADULTS`, `ADY_INFANT`, `ADY_CHILD` ilə verilə bilər.
 
 ## Static ADY filterləri
 
-Telegram botdakı stansiya siyahısı `src/modules/ady/stations.ts` içində statik saxlanılır. Siyahı ADY dropdown-dan scrape olunub və exact label-lar saxlanılıb ki, Playwright seçimi saytdakı real option text-lə işləsin.
+Telegram botdakı stansiya siyahısı `src/modules/ady/stations.ts` içində statik saxlanılır. Bot yalnız sənəddəki 8 stansiyanı göstərir; onların rəqəmsal ADY ID-ləri birbaşa `ticket-search` URL-i qurmaq üçün ayrıca saxlanılır.
+
+Yoxlama zamanı Playwright ana səhifədə formu doldurmur. Birbaşa `ticket-search` URL-i açır, loader bitdikdən sonra `.ticket__item` elementi varsa bileti mövcud sayır; element yoxdursa uyğun bilet olmadığı qəbul edilir.
 
 Qeyd: sayt Cloudflare istifadə edir. Ona görə browser default olaraq görünən rejimdə açılır (`ADY_HEADLESS=false`) və `.browser-profile` qovluğunda sessiyanı saxlayır.
 
@@ -160,7 +168,7 @@ docker compose --env-file /opt/ady-ticket-bot/.env up -d --build
 docker compose logs -f ady-ticket-bot
 ```
 
-Səhifə açılmasa, nəticə bilinməsə və ya ADY formu görünməsə, Docker loglarında `[ADY diagnostic:...]` sətirləri çıxır. Bu loglarda cari URL, title, search formun görünməsi, Cloudflare siqnalları, body text-in qısa hissəsi və diagnostic screenshot path-i görünür. Lazım olsa server `.env`-də `ADY_PAGE_DIAGNOSTICS_ENABLED=false` ilə söndürmək olar.
+Səhifə açılmasa və ya nəticə bilinməsə, Docker loglarında `[ADY diagnostic:...]` sətirləri çıxır. Bu loglarda cari URL, title, `.ticket__item` sayı, görünən loader, Cloudflare siqnalları, body text-in qısa hissəsi və diagnostic screenshot path-i görünür. Lazım olsa server `.env`-də `ADY_PAGE_DIAGNOSTICS_ENABLED=false` ilə söndürmək olar.
 
 GitHub Actions deploy needs these repository secrets:
 

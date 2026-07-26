@@ -13,7 +13,14 @@ import {
   stationDisplay,
   type AdyStation,
 } from './modules/ady/stations';
-import type { AdyRequest, CheckBatch, TicketsFoundResult } from './modules/ady/scraper';
+import {
+  formatPassengers,
+  MAX_ADULTS,
+  MAX_CHILD,
+  type AdyRequest,
+  type CheckBatch,
+  type TicketsFoundResult,
+} from './modules/ady/scraper';
 import {
   buildCalendarKeyboard,
   currentMonthCursor,
@@ -36,6 +43,7 @@ dotenv.config({ quiet: true });
 type StationField = 'from' | 'to';
 type ChatId = number | string;
 type TicketTypeId = 'comfort' | 'comfort-plus' | 'luxury' | 'standard-plus';
+type PassengerField = 'adults' | 'infant' | 'child';
 type TicketTypeOption = {
   id: TicketTypeId;
   label: string;
@@ -44,12 +52,14 @@ type TicketTypeOption = {
 
 interface BotSession {
   service: 'ady';
-  step: 'service' | StationField | 'dates' | 'adults' | 'ticketTypes' | 'confirm';
+  step: 'service' | StationField | 'dates' | PassengerField | 'ticketTypes' | 'confirm';
   fromStationId: string | null;
   toStationId: string | null;
   selectedDates: Set<string>;
   calendarCursor: CalendarCursor;
   adults: number | null;
+  infant: number | null;
+  child: number | null;
   selectedTicketTypeIds: Set<TicketTypeId>;
 }
 
@@ -69,7 +79,6 @@ if (!token) {
 
 const allowedChatIds = parseCsv(process.env.TELEGRAM_ALLOWED_CHAT_IDS || process.env.ADY_TELEGRAM_ALLOWED_CHAT_IDS || '');
 const maxSelectedDates = Math.min(positiveInteger(process.env.ADY_BOT_MAX_DATES, 4), 4);
-const maxPassengers = positiveInteger(process.env.ADY_BOT_MAX_PASSENGERS, 10);
 const stationsPerPage = positiveInteger(process.env.ADY_BOT_STATIONS_PER_PAGE, 8);
 const ADY_FROM_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
 const ADY_TO_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
@@ -129,7 +138,7 @@ bot.onText(/^\/status\b/, async (message: Message) => {
     return [
       `${index + 1}. ${job.request.from.label} -> ${job.request.to.label}`,
       `Tək gediş tarixləri: ${job.request.targetDates.map((target) => target.iso).join(', ')}`,
-      `Sərnişin: ${job.request.adults}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+      `Sərnişin: ${formatPassengers(job.request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
       `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
       `Son yoxlama: ${lastRun}`,
     ].join('\n');
@@ -314,17 +323,30 @@ async function handleCallback(query: CallbackQuery, data: string): Promise<void>
     }
 
     await answerCallback(query.id);
-    await askAdults(chatId);
+    await askPassengerCount(chatId, 'adults');
     return;
   }
 
   if (data.startsWith('p:')) {
-    const adults = Number(data.replace('p:', ''));
+    const [, fieldText, valueText] = data.split(':');
+    const field = parsePassengerField(fieldText);
+    const value = Number(valueText);
     const session = ensureSession(chatId);
-    session.adults = adults;
-    session.step = 'ticketTypes';
+    if (!field || !Number.isInteger(value) || !isValidPassengerSelection(session, field, value)) {
+      await answerCallback(query.id, 'Bu sərnişin sayı seçilə bilməz.');
+      return;
+    }
+
+    session[field] = value;
     await answerCallback(query.id);
-    await showTicketTypeSelector(chatId);
+    if (field === 'adults') {
+      await askPassengerCount(chatId, 'infant');
+    } else if (field === 'infant') {
+      await askPassengerCount(chatId, 'child');
+    } else {
+      session.step = 'ticketTypes';
+      await showTicketTypeSelector(chatId);
+    }
     return;
   }
 
@@ -398,16 +420,8 @@ async function handleTextMessage(message: Message): Promise<void> {
     return;
   }
 
-  if (session.step === 'adults') {
-    const adults = Number(text.replace(/[^\d]/g, ''));
-    if (!Number.isInteger(adults) || adults < 1 || adults > maxPassengers) {
-      await bot.sendMessage(chatId, `Sərnişin sayını 1-${maxPassengers} arası rəqəm kimi yaz.`);
-      return;
-    }
-
-    session.adults = adults;
-    session.step = 'ticketTypes';
-    await showTicketTypeSelector(chatId);
+  if (isPassengerField(session.step)) {
+    await bot.sendMessage(chatId, 'Sərnişin sayını aşağıdakı düymələrdən seç.');
     return;
   }
 
@@ -526,17 +540,18 @@ async function showCalendar(chatId: ChatId, editMessageId: number | undefined = 
   });
 }
 
-async function askAdults(chatId: ChatId): Promise<void> {
+async function askPassengerCount(chatId: ChatId, field: PassengerField): Promise<void> {
   const session = ensureSession(chatId);
-  session.step = 'adults';
+  session.step = field;
+  const values = passengerOptions(session, field);
   const buttons: InlineKeyboardButton[][] = [];
-  for (let value = 1; value <= Math.min(maxPassengers, 10); value += 1) {
-    const rowIndex = Math.floor((value - 1) / 5);
+  for (const [index, value] of values.entries()) {
+    const rowIndex = Math.floor(index / 5);
     buttons[rowIndex] ??= [];
-    buttons[rowIndex].push({ text: String(value), callback_data: `p:${value}` });
+    buttons[rowIndex].push({ text: String(value), callback_data: `p:${field}:${value}` });
   }
 
-  await bot.sendMessage(chatId, 'Neçə nəfərlik axtaraq?', {
+  await bot.sendMessage(chatId, passengerPrompt(field, session), {
     reply_markup: { inline_keyboard: buttons },
   });
 }
@@ -568,7 +583,7 @@ async function showConfirm(chatId: ChatId, session: BotSession): Promise<void> {
     'Sorğunu təsdiqlə:',
     `${request.from.label} -> ${request.to.label}`,
     `Tək gediş tarixləri: ${request.targetDates.join(', ')}`,
-    `Sərnişin: ${request.adults}`,
+    `Sərnişin: ${formatPassengers(request)}`,
     `Zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
     '',
     'Monitorinq hər 5 dəqiqədən bir yoxlayacaq.',
@@ -601,7 +616,7 @@ async function startMonitoring(chatId: ChatId, user: User, session: BotSession):
     status,
     `${request.from.label} -> ${request.to.label}`,
     `Tək gediş tarixləri: ${request.targetDates.join(', ')}`,
-    `Sərnişin: ${request.adults}, zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
+    `Sərnişin: ${formatPassengers(request)}, zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
     `Axtarış limiti: ${subscription.job.subscribers.get(String(chatId))?.maxChecks ?? 24} yoxlama`,
     `Aktiv subscriber sayı: ${subscription.subscriberCount}`,
     '',
@@ -638,7 +653,7 @@ function buildNoTicketsMessage(
     'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
     `Tarixlər: ${checkedDates || request.targetDates.map((target) => target.displayValue).join(', ')}`,
-    `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `${formatPassengers(request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
     `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
     '',
     retryLine,
@@ -660,7 +675,7 @@ function buildCheckFailedMessage(
     'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
     `Tarixlər: ${request.targetDates.map((target) => target.displayValue).join(', ')}`,
-    `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `${formatPassengers(request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
     `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
     '',
     retryLine,
@@ -731,7 +746,7 @@ function buildRequest(session: BotSession) {
   const from = getStationById(session.fromStationId ?? '');
   const to = getStationById(session.toStationId ?? '');
   const ticketTypes = getSelectedTicketTypeLabels(session.selectedTicketTypeIds);
-  if (!from || !to || session.adults == null || ticketTypes.length === 0) {
+  if (!from || !to || session.adults == null || session.infant == null || session.child == null || ticketTypes.length === 0) {
     throw new Error('Sorğu tamamlanmayıb.');
   }
 
@@ -740,6 +755,8 @@ function buildRequest(session: BotSession) {
     to,
     targetDates: [...session.selectedDates].sort(),
     adults: session.adults,
+    infant: session.infant,
+    child: session.child,
     maxPrice: Number.MAX_SAFE_INTEGER,
     ticketTypes,
   };
@@ -782,6 +799,8 @@ function createSession(): BotSession {
     selectedDates: new Set(),
     calendarCursor: currentMonthCursor(),
     adults: null,
+    infant: null,
+    child: null,
     selectedTicketTypeIds: new Set(),
   };
 }
@@ -822,6 +841,49 @@ async function answerCallback(callbackQueryId: string, text?: string): Promise<v
 
 function parseStationField(value: string | undefined): StationField | null {
   return value === 'from' || value === 'to' ? value : null;
+}
+
+function parsePassengerField(value: string | undefined): PassengerField | null {
+  return isPassengerField(value) ? value : null;
+}
+
+function isPassengerField(value: unknown): value is PassengerField {
+  return value === 'adults' || value === 'infant' || value === 'child';
+}
+
+function passengerOptions(session: BotSession, field: PassengerField): number[] {
+  if (field === 'adults') return numberRange(1, MAX_ADULTS);
+  if (field === 'infant') {
+    if (session.adults == null) return [];
+    return numberRange(0, MAX_ADULTS - session.adults);
+  }
+
+  return numberRange(0, MAX_CHILD);
+}
+
+function isValidPassengerSelection(session: BotSession, field: PassengerField, value: number): boolean {
+  return passengerOptions(session, field).includes(value);
+}
+
+function passengerPrompt(field: PassengerField, session: BotSession): string {
+  if (field === 'adults') {
+    return `Neçə Böyük sərnişin üçün axtaraq? (${1}-${MAX_ADULTS})`;
+  }
+
+  if (field === 'infant') {
+    const maxInfant = MAX_ADULTS - (session.adults ?? MAX_ADULTS);
+    return [
+      `Böyük: ${session.adults ?? 0}.`,
+      `Neçə Uşaq (10 yaşa qədər) üçün axtaraq? (0-${maxInfant})`,
+      'Böyük və Uşaq birlikdə maksimum 4 oturacaq tuta bilər.',
+    ].join('\n');
+  }
+
+  return `Neçə Körpə üçün axtaraq? (0-${MAX_CHILD})`;
+}
+
+function numberRange(min: number, max: number): number[] {
+  return Array.from({ length: Math.max(0, max - min + 1) }, (_, index) => min + index);
 }
 
 function parseCsv(value: string): string[] {
