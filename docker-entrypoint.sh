@@ -18,6 +18,24 @@ chrome_pid=''
 xvfb_pid=''
 app_pid=''
 
+chrome_args=(
+  --remote-debugging-address=127.0.0.1
+  --remote-debugging-port=9222
+  --remote-allow-origins=*
+  --user-data-dir="$profile_dir"
+  --no-first-run
+  --no-default-browser-check
+  --disable-dev-shm-usage
+  --no-sandbox
+  --window-size=1280,720
+)
+
+# WARP runs on the host and exposes a loopback-only SOCKS5 proxy. With host
+# networking, Chrome can reach it without exposing the proxy to the Internet.
+if [[ -n "${ADY_BROWSER_PROXY_SERVER:-}" ]]; then
+  chrome_args+=("--proxy-server=${ADY_BROWSER_PROXY_SERVER}")
+fi
+
 cleanup() {
   for pid in "$app_pid" "$chrome_pid" "$xvfb_pid"; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -36,16 +54,7 @@ if [[ -z "${DISPLAY:-}" ]]; then
   xvfb_pid="$!"
 fi
 
-google-chrome-stable \
-  --remote-debugging-address=127.0.0.1 \
-  --remote-debugging-port=9222 \
-  --remote-allow-origins='*' \
-  --user-data-dir="$profile_dir" \
-  --no-first-run \
-  --no-default-browser-check \
-  --disable-dev-shm-usage \
-  --no-sandbox \
-  --window-size=1280,720 \
+google-chrome-stable "${chrome_args[@]}" \
   > /tmp/ady-chrome.log 2>&1 &
 chrome_pid="$!"
 
