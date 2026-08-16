@@ -62,12 +62,12 @@ Bot axını:
 2. `ADY.az` seçimi
 3. Haradan stansiyası
 4. Haraya stansiyası
-5. Calendar üzərindən 1-4 arası gediş tarixi
+5. Calendar üzərindən 1-10 arası gediş tarixi
 6. Sərnişin sayı
 7. Zal tipi: Komfort, Komfort+, Lüks, Standart+
 8. Təsdiq
 
-Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. Sadəcə gediş tarixləri seçilir və bu seçim multi ola bilər, amma maksimum 4 gün seçilə bilər.
+Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. Sadəcə gediş tarixləri seçilir və bu seçim multi ola bilər, amma maksimum 10 gün seçilə bilər.
 
 İcazəli başlanğıc stansiyaları:
 
