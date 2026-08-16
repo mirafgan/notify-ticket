@@ -9,6 +9,38 @@ export interface AdyStation {
 export const ADY_STATIONS_SCRAPED_AT = '2026-07-10';
 export const ADY_STATIONS_SOURCE = 'https://ticket.ady.az/';
 
+// ticket.ady.az uses a separate numeric station ID in ticket-search URLs.
+// Keep this deliberately limited to the stations that the Telegram bot exposes.
+export const ADY_TICKET_STATION_IDS = {
+  'baki-dyv': 232,
+  bileceri: 230,
+  yevlax: 286,
+  gence: 295,
+  agstafa: 303,
+  'boyuk-kesik': 309,
+  'tbilisi-sern': 170,
+  qardabani: 172,
+} as const satisfies Record<string, number>;
+
+// Verified against ticket.ady.az on 2026-07-26. Every station in this set can
+// be paired with every other station in the set; only an identical origin and
+// destination is excluded.
+export const ADY_SUPPORTED_TICKET_STATION_IDS = [
+  'baki-dyv',
+  'bileceri',
+  'yevlax',
+  'gence',
+  'agstafa',
+  'boyuk-kesik',
+  'tbilisi-sern',
+  'qardabani',
+] as const satisfies readonly (keyof typeof ADY_TICKET_STATION_IDS)[];
+
+export function getTicketDestinationStationIds(fromStationId: string): string[] {
+  if (!ADY_SUPPORTED_TICKET_STATION_IDS.some((stationId) => stationId === fromStationId)) return [];
+  return ADY_SUPPORTED_TICKET_STATION_IDS.filter((stationId) => stationId !== fromStationId);
+}
+
 export const ADY_STATIONS = [
   { id: 'baki-dyv', label: 'Bakı', exact: 'BAKI DYV', query: 'BAKI', country: 'AZƏRBAYCAN' },
   { id: 'tbilisi-sern', label: 'Tbilisi-Sərn', exact: 'TBİLİSİ-SƏRN', query: 'TBİLİSİ', country: 'GÜRCÜSTAN' },
@@ -41,6 +73,10 @@ export const ADY_STATIONS = [
 
 export function getStationById(id: string): AdyStation | null {
   return ADY_STATIONS.find((station) => station.id === id) ?? null;
+}
+
+export function getTicketStationId(stationId: string): number | null {
+  return ADY_TICKET_STATION_IDS[stationId as keyof typeof ADY_TICKET_STATION_IDS] ?? null;
 }
 
 export function stationDisplay(station: AdyStation): string {

@@ -8,12 +8,21 @@ import TelegramBot, {
 } from 'node-telegram-bot-api';
 import {
   ADY_STATIONS,
+  ADY_SUPPORTED_TICKET_STATION_IDS,
+  getTicketDestinationStationIds,
   getStationById,
   matchStationText,
   stationDisplay,
   type AdyStation,
 } from './modules/ady/stations';
-import type { AdyRequest, CheckBatch, TicketsFoundResult } from './modules/ady/scraper';
+import {
+  formatPassengers,
+  MAX_ADULTS,
+  MAX_CHILD,
+  type AdyRequest,
+  type CheckBatch,
+  type TicketsFoundResult,
+} from './modules/ady/scraper';
 import {
   buildCalendarKeyboard,
   currentMonthCursor,
@@ -36,6 +45,7 @@ dotenv.config({ quiet: true });
 type StationField = 'from' | 'to';
 type ChatId = number | string;
 type TicketTypeId = 'comfort' | 'comfort-plus' | 'luxury' | 'standard-plus';
+type PassengerField = 'adults' | 'infant' | 'child';
 type TicketTypeOption = {
   id: TicketTypeId;
   label: string;
@@ -44,12 +54,14 @@ type TicketTypeOption = {
 
 interface BotSession {
   service: 'ady';
-  step: 'service' | StationField | 'dates' | 'adults' | 'ticketTypes' | 'confirm';
+  step: 'service' | StationField | 'dates' | PassengerField | 'ticketTypes' | 'confirm';
   fromStationId: string | null;
   toStationId: string | null;
   selectedDates: Set<string>;
   calendarCursor: CalendarCursor;
   adults: number | null;
+  infant: number | null;
+  child: number | null;
   selectedTicketTypeIds: Set<TicketTypeId>;
 }
 
@@ -130,7 +142,7 @@ bot.onText(/^\/status\b/, async (message: Message) => {
     return [
       `${index + 1}. ${job.request.from.label} -> ${job.request.to.label}`,
       `Tək gediş tarixləri: ${job.request.targetDates.map((target) => target.iso).join(', ')}`,
-      `Sərnişin: ${job.request.adults}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+      `Sərnişin: ${formatPassengers(job.request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
       `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
       `Son yoxlama: ${lastRun}`,
     ].join('\n');
@@ -181,10 +193,13 @@ jobManager.on('checked', async (event: CheckedEvent) => {
   await Promise.all(event.subscribers.map(async (subscriber) => {
     if (receivesAvailableOnly(subscriber.chatId)) return;
     if (hasMatchingTicket(event.batch, subscriber.ticketTypes)) return;
+    const message = hasUnknownResult(event.batch)
+      ? buildIndeterminateResultMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId))
+      : buildNoTicketsMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId));
 
     await bot.sendMessage(
       subscriber.chatId,
-      buildNoTicketsMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
+      message,
     ).catch((error: Error) => {
       console.error(`Telegram status mesajı göndərilmədi (${subscriber.chatId}): ${error.message}`);
     });
@@ -266,12 +281,12 @@ async function handleCallback(query: CallbackQuery, data: string): Promise<void>
     const [, fieldText, stationId] = data.split(':');
     const field = parseStationField(fieldText);
     const station = stationId ? getStationById(stationId) : null;
-    if (!field || !station || !isStationAllowedForField(field, station)) {
+    const session = ensureSession(chatId);
+    if (!field || !station || !isStationAllowedForField(field, station, session)) {
       await answerCallback(query.id, 'Bu istiqamət mövcud deyil.');
       return;
     }
 
-    const session = ensureSession(chatId);
     const accepted = await setStationSelection(chatId, session, field, station, query.id);
     if (!accepted) return;
 
@@ -317,17 +332,30 @@ async function handleCallback(query: CallbackQuery, data: string): Promise<void>
     }
 
     await answerCallback(query.id);
-    await askAdults(chatId);
+    await askPassengerCount(chatId, 'adults');
     return;
   }
 
   if (data.startsWith('p:')) {
-    const adults = Number(data.replace('p:', ''));
+    const [, fieldText, valueText] = data.split(':');
+    const field = parsePassengerField(fieldText);
+    const value = Number(valueText);
     const session = ensureSession(chatId);
-    session.adults = adults;
-    session.step = 'ticketTypes';
+    if (!field || !Number.isInteger(value) || !isValidPassengerSelection(session, field, value)) {
+      await answerCallback(query.id, 'Bu sərnişin sayı seçilə bilməz.');
+      return;
+    }
+
+    session[field] = value;
     await answerCallback(query.id);
-    await showTicketTypeSelector(chatId);
+    if (field === 'adults') {
+      await askPassengerCount(chatId, 'infant');
+    } else if (field === 'infant') {
+      await askPassengerCount(chatId, 'child');
+    } else {
+      session.step = 'ticketTypes';
+      await showTicketTypeSelector(chatId);
+    }
     return;
   }
 
@@ -384,9 +412,9 @@ async function handleTextMessage(message: Message): Promise<void> {
 
   if (session.step === 'from' || session.step === 'to') {
     const field = session.step;
-    const station = matchStationForField(field, text);
+    const station = matchStationForField(field, text, session);
     if (!station) {
-      await bot.sendMessage(chatId, stationHelpText(field));
+      await bot.sendMessage(chatId, stationHelpText(field, session));
       return;
     }
 
@@ -401,16 +429,8 @@ async function handleTextMessage(message: Message): Promise<void> {
     return;
   }
 
-  if (session.step === 'adults') {
-    const adults = Number(text.replace(/[^\d]/g, ''));
-    if (!Number.isInteger(adults) || adults < 1 || adults > maxPassengers) {
-      await bot.sendMessage(chatId, `Sərnişin sayını 1-${maxPassengers} arası rəqəm kimi yaz.`);
-      return;
-    }
-
-    session.adults = adults;
-    session.step = 'ticketTypes';
-    await showTicketTypeSelector(chatId);
+  if (isPassengerField(session.step)) {
+    await bot.sendMessage(chatId, 'Sərnişin sayını aşağıdakı düymələrdən seç.');
     return;
   }
 
@@ -438,6 +458,15 @@ async function setStationSelection(
   station: AdyStation,
   callbackQueryId?: string,
 ): Promise<boolean> {
+  if (!isStationAllowedForField(field, station, session)) {
+    if (callbackQueryId) {
+      await answerCallback(callbackQueryId, 'Bu istiqamət mövcud deyil.');
+    } else {
+      await bot.sendMessage(chatId, stationHelpText(field, session));
+    }
+    return false;
+  }
+
   if (field === 'to' && station.id === session.fromStationId) {
     if (callbackQueryId) {
       await answerCallback(callbackQueryId, 'Haradan və haraya eyni ola bilməz.');
@@ -477,7 +506,7 @@ async function showStationSelector(
   const session = ensureSession(chatId);
   session.step = field;
   const excludedId = field === 'to' ? session.fromStationId : null;
-  const stations = getStationsForField(field).filter((station) => station.id !== excludedId);
+  const stations = getStationsForField(field, session).filter((station) => station.id !== excludedId);
   const pageCount = Math.max(1, Math.ceil(stations.length / stationsPerPage));
   const safePage = Math.min(Math.max(page, 0), pageCount - 1);
   const start = safePage * stationsPerPage;
@@ -497,12 +526,12 @@ async function showStationSelector(
   const text = field === 'from'
     ? [
       'Haradan gedirsən?',
-      'Mövcud istiqamət yalnız Azərbaycandan Tbilisi və ya Qardabani tərəfədir.',
-      'Seçimlər: Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik.',
+      'Azərbaycan və Gürcüstan arasında gediş istiqamətini seç.',
+      'Seçimlər: Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik, Tbilisi-Sərn, Qardabani.',
     ].join('\n')
     : [
       'Haraya gedirsən?',
-      'Son məntəqə yalnız Tbilisi-Sərn və ya Qardabani seçilə bilər.',
+      stationHelpText(field, session),
     ].join('\n');
 
   await sendOrEdit(chatId, editMessageId, text, {
@@ -529,17 +558,18 @@ async function showCalendar(chatId: ChatId, editMessageId: number | undefined = 
   });
 }
 
-async function askAdults(chatId: ChatId): Promise<void> {
+async function askPassengerCount(chatId: ChatId, field: PassengerField): Promise<void> {
   const session = ensureSession(chatId);
-  session.step = 'adults';
+  session.step = field;
+  const values = passengerOptions(session, field);
   const buttons: InlineKeyboardButton[][] = [];
-  for (let value = 1; value <= Math.min(maxPassengers, 10); value += 1) {
-    const rowIndex = Math.floor((value - 1) / 5);
+  for (const [index, value] of values.entries()) {
+    const rowIndex = Math.floor(index / 5);
     buttons[rowIndex] ??= [];
-    buttons[rowIndex].push({ text: String(value), callback_data: `p:${value}` });
+    buttons[rowIndex].push({ text: String(value), callback_data: `p:${field}:${value}` });
   }
 
-  await bot.sendMessage(chatId, 'Neçə nəfərlik axtaraq?', {
+  await bot.sendMessage(chatId, passengerPrompt(field, session), {
     reply_markup: { inline_keyboard: buttons },
   });
 }
@@ -571,7 +601,7 @@ async function showConfirm(chatId: ChatId, session: BotSession): Promise<void> {
     'Sorğunu təsdiqlə:',
     `${request.from.label} -> ${request.to.label}`,
     `Tək gediş tarixləri: ${request.targetDates.join(', ')}`,
-    `Sərnişin: ${request.adults}`,
+    `Sərnişin: ${formatPassengers(request)}`,
     `Zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
     '',
     'Monitorinq hər 5 dəqiqədən bir yoxlayacaq.',
@@ -604,7 +634,7 @@ async function startMonitoring(chatId: ChatId, user: User, session: BotSession):
     status,
     `${request.from.label} -> ${request.to.label}`,
     `Tək gediş tarixləri: ${request.targetDates.join(', ')}`,
-    `Sərnişin: ${request.adults}, zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
+    `Sərnişin: ${formatPassengers(request)}, zal tipi: ${formatTicketTypes(request.ticketTypes)}`,
     `Axtarış limiti: ${subscription.job.subscribers.get(String(chatId))?.maxChecks ?? 24} yoxlama`,
     `Aktiv subscriber sayı: ${subscription.subscriberCount}`,
     '',
@@ -645,8 +675,32 @@ function buildNoTicketsMessage(
     'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
     `Tarixlər: ${checkedDates || request.targetDates.map((target) => target.displayValue).join(', ')}`,
-    `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `${formatPassengers(request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
     `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
+    '',
+    retryLine,
+  ].join('\n');
+}
+
+function buildIndeterminateResultMessage(
+  request: AdyRequest,
+  batch: CheckBatch,
+  subscriber: AdySubscriber,
+  nextCheckInMs: number,
+  expired: boolean,
+): string {
+  const unknownResults = batch.results.filter((result) => result.status === 'unknown');
+  const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
+  const retryLine = expired
+    ? 'Axtarış limiti bitdiyi üçün nəticə yenidən yoxlanmayacaq.'
+    : `${formatRetryDelay(nextCheckInMs)} sonra nəticə yenidən yoxlanacaq. Qalan yoxlama sayı: ${remainingChecks}.`;
+
+  return [
+    'ADY axtarışının nəticəsi tam müəyyən olmadı.',
+    `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
+    `Tarixlər: ${unknownResults.map((result) => result.target.displayValue).join(', ')}`,
+    `${formatPassengers(request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `Səbəb: ${unknownResults.map((result) => result.message).join(' ')}`,
     '',
     retryLine,
   ].join('\n');
@@ -660,14 +714,14 @@ function buildCheckFailedMessage(
 ): string {
   const remainingChecks = Math.max(0, subscriber.maxChecks - subscriber.checksCompleted);
   const retryLine = expired
-    ? 'Bu yoxlamanı etdim, uyğun bilet tapılmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
-    : `Bu yoxlamanı etdim, uyğun bilet tapılmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlayacam. Qalan yoxlama sayı: ${remainingChecks}.`;
+    ? 'ADY yoxlaması xətayla tamamlanmadı. Axtarış limiti bitdi və monitorinq dayandırıldı.'
+    : `ADY yoxlaması xətayla tamamlanmadı. ${formatRetryDelay(nextCheckInMs)} sonra yenidən yoxlanacaq. Qalan yoxlama sayı: ${remainingChecks}.`;
 
   return [
     'ADY axtarışı edildi.',
     `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
     `Tarixlər: ${request.targetDates.map((target) => target.displayValue).join(', ')}`,
-    `${request.adults} nəfər, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
+    `${formatPassengers(request)}, zal tipi: ${formatTicketTypes(subscriber.ticketTypes)}`,
     `Yoxlama limiti: ${subscriber.checksCompleted}/${subscriber.maxChecks}`,
     '',
     retryLine,
@@ -738,7 +792,7 @@ function buildRequest(session: BotSession) {
   const from = getStationById(session.fromStationId ?? '');
   const to = getStationById(session.toStationId ?? '');
   const ticketTypes = getSelectedTicketTypeLabels(session.selectedTicketTypeIds);
-  if (!from || !to || session.adults == null || ticketTypes.length === 0) {
+  if (!from || !to || session.adults == null || session.infant == null || session.child == null || ticketTypes.length === 0) {
     throw new Error('Sorğu tamamlanmayıb.');
   }
 
@@ -747,37 +801,42 @@ function buildRequest(session: BotSession) {
     to,
     targetDates: [...session.selectedDates].sort(),
     adults: session.adults,
+    infant: session.infant,
+    child: session.child,
     maxPrice: Number.MAX_SAFE_INTEGER,
     ticketTypes,
   };
 }
 
-function getStationsForField(field: StationField): AdyStation[] {
-  const allowedIds = getAllowedStationIds(field);
+function getStationsForField(field: StationField, session?: Pick<BotSession, 'fromStationId'>): AdyStation[] {
+  const allowedIds = getAllowedStationIds(field, session?.fromStationId ?? null);
   return ADY_STATIONS.filter((station) => allowedIds.includes(station.id));
 }
 
-function getAllowedStationIds(field: StationField): readonly string[] {
-  if (field === 'from') return ADY_FROM_STATION_IDS;
-  return ADY_TO_STATION_IDS;
+function getAllowedStationIds(field: StationField, fromStationId: string | null = null): readonly string[] {
+  if (field === 'from') return ADY_SUPPORTED_TICKET_STATION_IDS;
+  return fromStationId ? getTicketDestinationStationIds(fromStationId) : [];
 }
 
-function isStationAllowedForField(field: StationField, station: AdyStation): boolean {
-  return getStationsForField(field).some((allowedStation) => allowedStation.id === station.id);
+function isStationAllowedForField(field: StationField, station: AdyStation, session?: Pick<BotSession, 'fromStationId'>): boolean {
+  return getStationsForField(field, session).some((allowedStation) => allowedStation.id === station.id);
 }
 
-function matchStationForField(field: StationField, text: string): AdyStation | null {
+function matchStationForField(field: StationField, text: string, session?: Pick<BotSession, 'fromStationId'>): AdyStation | null {
   const station = matchStationText(text);
-  if (!station || !isStationAllowedForField(field, station)) return null;
+  if (!station || !isStationAllowedForField(field, station, session)) return null;
   return station;
 }
 
-function stationHelpText(field: StationField): string {
+function stationHelpText(field: StationField, session?: Pick<BotSession, 'fromStationId'>): string {
   if (field === 'from') {
-    return 'Bu istiqamət üçün başlanğıc yalnız bunlardan biri ola bilər: Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik.';
+    return 'Başlanğıc Bakı, Biləcəri, Yevlax, Gəncə, Ağstafa, Böyük-Kəsik, Tbilisi-Sərn və ya Qardabani ola bilər.';
   }
 
-  return 'Bu istiqamət üçün son məntəqə yalnız Tbilisi-Sərn və ya Qardabani ola bilər.';
+  if (!session?.fromStationId) return 'Əvvəl başlanğıc stansiyanı seçin.';
+
+  const destinations = getStationsForField('to', session).map((station) => station.label).join(', ');
+  return `Seçilmiş başlanğıc stansiyası üçün son məntəqə: ${destinations}.`;
 }
 
 function createSession(): BotSession {
@@ -789,6 +848,8 @@ function createSession(): BotSession {
     selectedDates: new Set(),
     calendarCursor: currentMonthCursor(),
     adults: null,
+    infant: null,
+    child: null,
     selectedTicketTypeIds: new Set(),
   };
 }
@@ -829,6 +890,49 @@ async function answerCallback(callbackQueryId: string, text?: string): Promise<v
 
 function parseStationField(value: string | undefined): StationField | null {
   return value === 'from' || value === 'to' ? value : null;
+}
+
+function parsePassengerField(value: string | undefined): PassengerField | null {
+  return isPassengerField(value) ? value : null;
+}
+
+function isPassengerField(value: unknown): value is PassengerField {
+  return value === 'adults' || value === 'infant' || value === 'child';
+}
+
+function passengerOptions(session: BotSession, field: PassengerField): number[] {
+  if (field === 'adults') return numberRange(1, MAX_ADULTS);
+  if (field === 'infant') {
+    if (session.adults == null) return [];
+    return numberRange(0, MAX_ADULTS - session.adults);
+  }
+
+  return numberRange(0, MAX_CHILD);
+}
+
+function isValidPassengerSelection(session: BotSession, field: PassengerField, value: number): boolean {
+  return passengerOptions(session, field).includes(value);
+}
+
+function passengerPrompt(field: PassengerField, session: BotSession): string {
+  if (field === 'adults') {
+    return `Neçə Böyük sərnişin üçün axtaraq? (${1}-${MAX_ADULTS})`;
+  }
+
+  if (field === 'infant') {
+    const maxInfant = MAX_ADULTS - (session.adults ?? MAX_ADULTS);
+    return [
+      `Böyük: ${session.adults ?? 0}.`,
+      `Neçə Uşaq (10 yaşa qədər) üçün axtaraq? (0-${maxInfant})`,
+      'Böyük və Uşaq birlikdə maksimum 4 oturacaq tuta bilər.',
+    ].join('\n');
+  }
+
+  return `Neçə Körpə üçün axtaraq? (0-${MAX_CHILD})`;
+}
+
+function numberRange(min: number, max: number): number[] {
+  return Array.from({ length: Math.max(0, max - min + 1) }, (_, index) => min + index);
 }
 
 function parseCsv(value: string): string[] {
