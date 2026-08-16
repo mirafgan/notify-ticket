@@ -63,7 +63,7 @@ export function buildCalendarKeyboard(
 ): InlineKeyboardMarkup {
   const selected = new Set(selectedDates);
   const minDateIso = options.minDateIso ?? toIsoDate(new Date());
-  const maxSelectedDates = options.maxSelectedDates ?? 4;
+  const maxSelectedDates = options.maxSelectedDates ?? 10;
   const previous = shiftMonth(cursor, -1);
   const next = shiftMonth(cursor, 1);
   const keyboard: InlineKeyboardMarkup['inline_keyboard'] = [

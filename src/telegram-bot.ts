@@ -80,8 +80,12 @@ if (!token) {
 }
 
 const allowedChatIds = parseCsv(process.env.TELEGRAM_ALLOWED_CHAT_IDS || process.env.ADY_TELEGRAM_ALLOWED_CHAT_IDS || '');
-const maxSelectedDates = Math.min(positiveInteger(process.env.ADY_BOT_MAX_DATES, 4), 4);
+const maxSelectedDates = Math.min(positiveInteger(process.env.ADY_BOT_MAX_DATES, 10), 10);
+const maxPassengers = positiveInteger(process.env.ADY_BOT_MAX_PASSENGERS, 10);
 const stationsPerPage = positiveInteger(process.env.ADY_BOT_STATIONS_PER_PAGE, 8);
+const AVAILABLE_ONLY_CHAT_IDS = new Set(['1024622595']);
+const ADY_FROM_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
+const ADY_TO_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
 const TICKET_TYPE_OPTIONS: TicketTypeOption[] = [
   { id: 'comfort', label: 'Komfort', aliases: ['Komfort'] },
   { id: 'comfort-plus', label: 'Komfort+', aliases: ['Komfort+'] },
@@ -187,6 +191,7 @@ jobManager.on('checked', async (event: CheckedEvent) => {
   const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
 
   await Promise.all(event.subscribers.map(async (subscriber) => {
+    if (receivesAvailableOnly(subscriber.chatId)) return;
     if (hasMatchingTicket(event.batch, subscriber.ticketTypes)) return;
     const message = hasUnknownResult(event.batch)
       ? buildIndeterminateResultMessage(event.job.request, event.batch, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId))
@@ -205,6 +210,7 @@ jobManager.on('check-failed', async (event: CheckFailedEvent) => {
   const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
 
   await Promise.all(event.subscribers.map(async (subscriber) => {
+    if (receivesAvailableOnly(subscriber.chatId)) return;
     await bot.sendMessage(
       subscriber.chatId,
       buildCheckFailedMessage(event.job.request, subscriber, event.nextCheckInMs, expiredChatIds.has(subscriber.chatId)),
@@ -642,8 +648,8 @@ function hasMatchingTicket(batch: CheckBatch, selectedTicketTypes: string[]): bo
   ));
 }
 
-function hasUnknownResult(batch: CheckBatch): boolean {
-  return batch.results.some((result) => result.status === 'unknown');
+function receivesAvailableOnly(chatId: ChatId): boolean {
+  return AVAILABLE_ONLY_CHAT_IDS.has(String(chatId));
 }
 
 function ticketTypesMatch(availableTicketTypes: string[], selectedTicketTypes: string[]): boolean {

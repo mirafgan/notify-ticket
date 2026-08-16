@@ -72,7 +72,7 @@ Bot axını:
 9. Zal tipi: Komfort, Komfort+, Lüks, Standart+
 10. Təsdiq
 
-Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. Sadəcə gediş tarixləri seçilir və bu seçim multi ola bilər, amma maksimum 4 gün seçilə bilər.
+Bot yalnız tək istiqaməti izləyir. Ona görə qayıdış tarixi seçilmir. Sadəcə gediş tarixləri seçilir və bu seçim multi ola bilər, amma maksimum 10 gün seçilə bilər.
 
 İcazəli başlanğıc stansiyaları:
 
