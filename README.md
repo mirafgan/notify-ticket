@@ -33,6 +33,8 @@ Bot üçün `.env`-də saxlanan parametrlər:
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_ALLOWED_CHAT_IDS`
+- `ADY_BOT_CAPTCHA_ALERT_CHAT_ID` (422/ReCaptcha olduqda xəbərdarlıq göndəriləcək idarəetmə chat ID-si)
+- `ADY_BOT_REMOTE_DESKTOP_URL` (CAPTCHA xəbərdarlığındakı private noVNC linki)
 - `ADY_URL`
 - `ADY_INTERVAL_MS`
 - `ADY_RESULT_WAIT_MS`
@@ -40,6 +42,7 @@ Bot üçün `.env`-də saxlanan parametrlər:
 - `ADY_BROWSER_CHANNEL`
 - `ADY_BROWSER_CDP_URL` (istəyə bağlı: istifadəçinin açdığı Chrome-a CDP ilə qoşulmaq üçün)
 - `ADY_BROWSER_PROFILE_DIR`
+- `ADY_BROWSER_PROXY_SERVER` (istəyə bağlı: Chrome-un istifadə edəcəyi SOCKS5/HTTP proxy)
 - `ADY_ARTIFACTS_DIR`
 - `ADY_PAGE_DIAGNOSTICS_ENABLED`
 - `ADY_PAGE_DIAGNOSTICS_TEXT_LIMIT`
@@ -159,6 +162,8 @@ npm.cmd run check
 ## Docker deploy
 
 Docker image normal Google Chrome prosesini başladır və bot ona CDP vasitəsilə qoşulur. Bu, ADY-nin Playwright-in birbaşa yaratdığı sessiyalar üçün qaytardığı ReCaptcha xətasının qarşısını alır. Serverdə ayrıca `ADY_BROWSER_CDP_URL` yazmaq lazım deyil; yalnız container-dən kənar Chrome istifadə edilirsə həmin URL təyin olunur.
+
+Chrome-un ekranı noVNC ilə container-də `6080` portunda işləyir. Docker bu portu yalnız serverin `127.0.0.1` ünvanına bağlayır; telefon üçün onu Tailscale Serve vasitəsilə private HTTPS link kimi paylaşın. `9222` Chrome debug portunu internetə açmayın.
 
 Server layout:
 

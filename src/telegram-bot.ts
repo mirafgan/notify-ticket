@@ -84,6 +84,8 @@ const maxSelectedDates = Math.min(positiveInteger(process.env.ADY_BOT_MAX_DATES,
 const maxPassengers = positiveInteger(process.env.ADY_BOT_MAX_PASSENGERS, 10);
 const stationsPerPage = positiveInteger(process.env.ADY_BOT_STATIONS_PER_PAGE, 8);
 const AVAILABLE_ONLY_CHAT_IDS = new Set(['1024622595']);
+const captchaAlertChatId = process.env.ADY_BOT_CAPTCHA_ALERT_CHAT_ID?.trim() || '';
+const remoteDesktopUrl = process.env.ADY_BOT_REMOTE_DESKTOP_URL?.trim() || '';
 const ADY_FROM_STATION_IDS = ['baki-dyv', 'bileceri', 'yevlax', 'gence', 'agstafa', 'boyuk-kesik'] as const;
 const ADY_TO_STATION_IDS = ['tbilisi-sern', 'qardabani'] as const;
 const TICKET_TYPE_OPTIONS: TicketTypeOption[] = [
@@ -101,6 +103,7 @@ const BOT_COMMANDS: TelegramCommand[] = [
 
 const sessions = new Map<string, BotSession>();
 const bot = new TelegramBot(token, { polling: true });
+let captchaAlertSent = false;
 const jobManager = new AdyJobManager({
   runtimeConfig: {
     screenshotsEnabled: parseBoolean(process.env.ADY_BOT_SCREENSHOTS_ENABLED, false),
@@ -188,6 +191,12 @@ jobManager.on('available', async (event: AvailableEvent) => {
 });
 
 jobManager.on('checked', async (event: CheckedEvent) => {
+  if (hasCaptchaResult(event.batch)) {
+    await sendCaptchaAlert(event.job.request);
+  } else {
+    captchaAlertSent = false;
+  }
+
   const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
 
   await Promise.all(event.subscribers.map(async (subscriber) => {
@@ -207,6 +216,10 @@ jobManager.on('checked', async (event: CheckedEvent) => {
 });
 
 jobManager.on('check-failed', async (event: CheckFailedEvent) => {
+  if (isCaptchaError(event.error)) {
+    await sendCaptchaAlert(event.job.request);
+  }
+
   const expiredChatIds = new Set(event.expiredSubscribers.map((subscriber) => subscriber.chatId));
 
   await Promise.all(event.subscribers.map(async (subscriber) => {
@@ -650,6 +663,33 @@ function hasMatchingTicket(batch: CheckBatch, selectedTicketTypes: string[]): bo
 
 function hasUnknownResult(batch: CheckBatch): boolean {
   return batch.results.some((result) => result.status === 'unknown');
+}
+
+function hasCaptchaResult(batch: CheckBatch): boolean {
+  return batch.results.some((result) => isCaptchaError(result.message));
+}
+
+function isCaptchaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b422\b/.test(message) && /(?:re)?captcha/i.test(message);
+}
+
+async function sendCaptchaAlert(request: AdyRequest): Promise<void> {
+  if (!captchaAlertChatId || captchaAlertSent) return;
+
+  try {
+    await bot.sendMessage(captchaAlertChatId, [
+      'ADY-də 422 ReCaptcha xətası aşkarlandı.',
+      `${request.from.label || request.from.exact} -> ${request.to.label || request.to.exact}`,
+      `Tarixlər: ${request.targetDates.map((target) => target.displayValue).join(', ')}`,
+      '',
+      'Serverdəki Chrome sessiyasında CAPTCHA-nı əl ilə keçin.',
+      ...(remoteDesktopUrl ? [`Chrome ekranı: ${remoteDesktopUrl}`] : []),
+    ].join('\n'));
+    captchaAlertSent = true;
+  } catch (error) {
+    console.error(`Telegram CAPTCHA xəbərdarlığı göndərilmədi (${captchaAlertChatId}): ${formatErrorMessage(error)}`);
+  }
 }
 
 function receivesAvailableOnly(chatId: ChatId): boolean {
