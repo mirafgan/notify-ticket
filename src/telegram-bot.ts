@@ -648,6 +648,10 @@ function hasMatchingTicket(batch: CheckBatch, selectedTicketTypes: string[]): bo
   ));
 }
 
+function hasUnknownResult(batch: CheckBatch): boolean {
+  return batch.results.some((result) => result.status === 'unknown');
+}
+
 function receivesAvailableOnly(chatId: ChatId): boolean {
   return AVAILABLE_ONLY_CHAT_IDS.has(String(chatId));
 }
