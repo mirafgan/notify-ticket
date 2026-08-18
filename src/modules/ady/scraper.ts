@@ -1,12 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { chromium, type BrowserContext, type Page, type Response } from 'playwright';
-import {
-  getStationById,
-  getTicketStationId,
-  matchStationText,
-  type AdyStation,
-} from './stations';
+import {type BrowserContext, chromium, type Page, type Response} from 'playwright';
+import {type AdyStation, getStationById, getTicketStationId, matchStationText,} from './stations';
 
 export const MAX_ADULTS = 4;
 export const MAX_CHILD = 4;
@@ -646,7 +641,7 @@ async function openTicketSearch(
     await page.goto(ticketSearchUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
     const response = await ticketApiResponse;
-    const result = await getTicketApiResult(response);
+    const result = await getTicketApiResult(response, runtimeConfig.log ?? defaultLog);
     if (result.status !== 'ready') return result;
 
     // The ticket page renders the response asynchronously after the API resolves.
@@ -660,8 +655,23 @@ async function openTicketSearch(
   }
 }
 
-async function getTicketApiResult(response: Response): Promise<TicketSearchLoadResult> {
-  const payload = await response.json().catch(() => null);
+async function getTicketApiResult(response: Response, log: LogFn): Promise<TicketSearchLoadResult> {
+  // Read the raw body once so the exact API response can be preserved in a 422 diagnostic.
+  const responseBody = await response.text().catch(() => '');
+  let payload: unknown = null;
+  try {
+    payload = JSON.parse(responseBody);
+  } catch {
+    // A non-JSON error response is still classified by its HTTP status below.
+  }
+
+  if (response.status() === 422) {
+    const request = response.request();
+    log(`[ADY 422 request] ${request.method()} ${response.url()}`);
+    log(`[ADY 422 request] payload=${request.postData() ?? '[empty]'}`);
+    log(`[ADY 422 response] body=${responseBody || '[empty]'}`);
+  }
+
   return classifyTicketApiResult(response.status(), payload);
 }
 
