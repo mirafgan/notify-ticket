@@ -145,9 +145,9 @@ CLI rejimi hələ qalır. Telegram bot axınında marşrut, tarixlər, sərnişi
 
 ## Static ADY filterləri
 
-Telegram botdakı stansiya siyahısı `src/modules/ady/stations.ts` içində statik saxlanılır. Bot yalnız sənəddəki 8 stansiyanı göstərir; onların rəqəmsal ADY ID-ləri birbaşa `ticket-search` URL-i qurmaq üçün ayrıca saxlanılır.
+Telegram botdakı stansiya siyahısı `src/modules/ady/stations.ts` içində statik saxlanılır. Bot yalnız sənəddəki 8 stansiyanı göstərir və Playwright həmin stansiyaların ADY formundakı dəqiq mətnini seçir.
 
-Yoxlama zamanı Playwright ana səhifədə formu doldurmur. Birbaşa `ticket-search` URL-i açır, loader bitdikdən sonra `.ticket__item` elementi varsa bileti mövcud sayır; element yoxdursa uyğun bilet olmadığı qəbul edilir.
+Yoxlama zamanı Playwright ADY-nin ana səhifəsini açır, formda stansiyaları, gediş tarixini və sərnişin saylarını seçib `Axtar` düyməsini basır. Bot nəticəni səhifədə görünən "Qatar seçimi" bölməsindən oxuyur; "Bütün biletlər satılıb" modalı görünərsə bunu uyğun bilet olmadığı kimi qəbul edir. Birbaşa `ticket-search` URL-i açılmır.
 
 Qeyd: sayt Cloudflare istifadə edir. Ona görə browser default olaraq görünən rejimdə açılır (`ADY_HEADLESS=false`) və `.browser-profile` qovluğunda sessiyanı saxlayır.
 
