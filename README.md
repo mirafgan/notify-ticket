@@ -188,3 +188,6 @@ GitHub Actions deploy needs these repository secrets:
 - `DEPLOY_SSH_KEY` - private key contents for `C:\Users\Mirafgan\.ssh\ady_bot_169_58_0_129.pem`
 
 Keep Telegram and ADY runtime settings only on the server in `/opt/ady-ticket-bot/.env`.
+
+
+<!-- Security scan triggered at 2026-09-05 07:54:12 -->
