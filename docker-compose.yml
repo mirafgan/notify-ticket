@@ -13,6 +13,8 @@ services:
       NODE_ENV: production
       ADY_BROWSER_PROFILE_DIR: /data/browser-profile
       ADY_ARTIFACTS_DIR: /data/artifacts
+    ports:
+      - "127.0.0.1:6080:6080"
     volumes:
       - /opt/ady-ticket-bot/data/browser-profile:/data/browser-profile
       - /opt/ady-ticket-bot/data/artifacts:/data/artifacts
